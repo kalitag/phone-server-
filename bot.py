@@ -20,8 +20,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot Configuration
-BOT_TOKEN = "8465346144:AAGSHC77UkXVZZTUscbYItvJxgQbBxmFcWo"
-BOT_USERNAME = "@tg_workbot"
+BOT_TOKEN = "8475626328:AAHpLsi5hL-1UfKGOdOWxQBHbDPyU6ExTG8"
+BOT_USERNAME = "@Py_hostbot"
 
 # Enhanced supported URL shorteners
 SHORTENERS = [
