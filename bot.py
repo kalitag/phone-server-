@@ -17,8 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot Configuration
-BOT_TOKEN = "8475626328:AAHpLsi5hL-1UfKGOdOWxQBHbDPyU6ExTG8"
-BOT_USERNAME = "@Py_hostbot"
+BOT_TOKEN = "8465346144:AAGSHC77UkXVZZTUscbYItvJxgQbBxmFcWo"
+BOT_USERNAME = "@tg_workbot"
 
 # URL shorteners list
 SHORTENERS = [
@@ -85,17 +85,17 @@ class SmartLinkProcessor:
         
         urls = []
         
+        # Improved general URL pattern
+        general_pattern = r'(?:https?://|www\.)?[a-zA-Z0-9-]{2,}(?:\.[a-zA-Z0-9-]{2,})+(?:/[^\s<>"{}|\\^`[\]]*)*'
+        potential_urls = re.findall(general_pattern, text, re.IGNORECASE)
+        for url in potential_urls:
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url if url.startswith('www.') else 'https://www.' + url
+            urls.append(url)
+        
         # Standard HTTP/HTTPS URLs
         standard_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+(?=[.\s]|$)'
         urls.extend(re.findall(standard_pattern, text, re.IGNORECASE))
-        
-        # URLs with www
-        www_pattern = r'www\.[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:/[^\s<>"{}|\\^`\[\]]*)?'
-        potential_urls = re.findall(www_pattern, text)
-        for url in potential_urls:
-            if not url.startswith('http'):
-                url = 'https://' + url
-            urls.append(url)
         
         # Platform-specific domains
         domain_patterns = [
@@ -128,7 +128,7 @@ class SmartLinkProcessor:
         seen = set()
         
         for url in urls:
-            url = re.sub(r'[.,;:!?\)\]]+$', '', url)
+            url = re.sub(r'[.,;:!?\)\]]+$', '', url).strip()
             if url and url not in seen and len(url) > 10 and '.' in url:
                 cleaned_urls.append(url)
                 seen.add(url)
@@ -159,7 +159,8 @@ class SmartLinkProcessor:
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.9',
-                    'Connection': 'keep-alive'
+                    'Connection': 'keep-alive',
+                    'Referer': 'https://www.google.com/'
                 }
                 
                 # Try HEAD request first
@@ -174,7 +175,7 @@ class SmartLinkProcessor:
                         if final_url != current_url and len(final_url) > len(current_url):
                             logger.info(f"HEAD unshorten successful: {final_url}")
                             current_url = final_url
-                            break
+                            continue  # Continue to check if further unshortening needed
                 except:
                     pass
                 
@@ -190,7 +191,7 @@ class SmartLinkProcessor:
                         if final_url != current_url and len(final_url) > len(current_url):
                             logger.info(f"GET unshorten successful: {final_url}")
                             current_url = final_url
-                            break
+                            continue
                 except:
                     pass
                 
@@ -249,7 +250,7 @@ class SmartLinkProcessor:
                     match = re.search(pattern, full_path)
                     if match:
                         pid = match.group(1)
-                        return f"https://www.flipkart.com/p/{pid}"
+                        return f"https://www.flipkart.com/product/p/{pid}"
                 
                 query_params = parse_qs(parsed.query)
                 essential_params = {}
@@ -320,7 +321,8 @@ class MessageParser:
             r'₹\s*(\d+(?:,\d+)*)',
             r'Rs\.?\s*(\d+(?:,\d+)*)',
             r'price[:\s]+(\d+(?:,\d+)*)',
-            r'(\d+)\s*rs\b'
+            r'(\d+)\s*rs\b',
+            r'(\d{1,6}(?:,\d{3})*)\s*(?:inr|rupees|rs|₹)'
         ]
         
         for pattern in price_patterns:
@@ -363,10 +365,7 @@ class MessageParser:
         for pattern in QUANTITY_PATTERNS:
             match = re.search(pattern, message, re.IGNORECASE)
             if match:
-                if len(match.groups()) > 0:
-                    quantity = match.group(1)
-                else:
-                    quantity = match.group(0)
+                quantity = match.group(1) if match.groups() else match.group(0)
                 info['quantity'] = quantity.strip()
                 break
         
@@ -379,7 +378,7 @@ class MessageParser:
         title = ' '.join(title.split())
         
         if title and len(title) > 3:
-            info['title'] = title[:60].strip()
+            info['title'] = title[:100].strip()  # Increased length for better capture
         
         return info
 
@@ -429,17 +428,18 @@ class ProductScraper:
                 if value:
                     result[key] = value
         
-        # Try scraping
-        scraped_info = await ProductScraper._try_scraping_methods(url, session, platform)
-        
-        # Merge scraped info
-        for key, value in scraped_info.items():
-            if value and not result.get(key):
-                result[key] = value
+        try:
+            scraped_info = await ProductScraper._try_scraping_methods(url, session, platform)
+            # Merge scraped info, prefer scraped if manual empty
+            for key, value in scraped_info.items():
+                if value:
+                    result[key] = value
+        except Exception as e:
+            logger.error(f"Scraping failed for {url}: {e}")
+            result['error'] = 'Scraping failed, using manual info'
         
         # Validate result
-        if not result.get('title') and not result.get('price'):
-            result['error'] = 'Could not extract product information'
+        if not result.get('title'):
             if 'amazon' in url:
                 result['title'] = 'Amazon Product'
             elif 'flipkart' in url:
@@ -464,22 +464,24 @@ class ProductScraper:
             'pin': ''
         }
         
-        headers_list = [
-            {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
-                'Connection': 'keep-alive'
-            },
-            {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-            }
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0'
         ]
         
-        for i, headers in enumerate(headers_list):
+        for i, ua in enumerate(user_agents):
             try:
-                logger.info(f"Scraping attempt {i+1} for {platform}")
+                headers = {
+                    'User-Agent': ua,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
+                    'Connection': 'keep-alive',
+                    'Referer': 'https://www.google.com/'
+                }
+                
+                logger.info(f"Scraping attempt {i+1} for {platform} with UA: {ua}")
                 
                 async with session.get(
                     url, 
@@ -487,7 +489,7 @@ class ProductScraper:
                     timeout=aiohttp.ClientTimeout(total=20)
                 ) as response:
                     
-                    if response.status == 200:
+                    if response.status in (200, 301, 302):
                         html = await response.text()
                         
                         if len(html) > 1000:
@@ -507,7 +509,7 @@ class ProductScraper:
                 logger.warning(f"Scraping attempt {i+1} failed: {e}")
                 continue
             
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.5)
         
         return info
     
@@ -524,7 +526,8 @@ class ProductScraper:
                 'h1.a-size-large.a-spacing-none.a-color-base',
                 'span#productTitle',
                 '.product-title',
-                'meta[property="og:title"]'
+                'meta[property="og:title"]',
+                'title'
             ],
             'flipkart': [
                 '.B_NuCI',
@@ -532,27 +535,31 @@ class ProductScraper:
                 'h1.yhB1nd',
                 '.fsXA5P',
                 'h1',
-                'meta[property="og:title"]'
+                'meta[property="og:title"]',
+                'title'
             ],
             'meesho': [
                 '[data-testid="product-title"]',
                 '.product-title',
                 'h1',
                 '.sc-bcXHqe',
-                'meta[property="og:title"]'
+                'meta[property="og:title"]',
+                'title'
             ],
             'myntra': [
                 '.pdp-name',
                 '.pdp-title',
                 'h1.pdp-name',
                 '.product-brand-name',
-                'meta[property="og:title"]'
+                'meta[property="og:title"]',
+                'title'
             ],
             'ajio': [
                 '.prod-name',
                 '.product-name',
                 'h1.prod-title',
-                'meta[property="og:title"]'
+                'meta[property="og:title"]',
+                'title'
             ],
             'generic': [
                 'h1',
@@ -573,7 +580,7 @@ class ProductScraper:
                     else:
                         text = element.get_text(strip=True)
                     
-                    if text and len(text) > 5 and len(text) < 200:
+                    if text and len(text) > 5 and len(text) < 300:
                         cleaned_title = ProductScraper._clean_title(text)
                         if cleaned_title:
                             info['title'] = cleaned_title
@@ -584,24 +591,13 @@ class ProductScraper:
             except:
                 continue
         
-        # Price extraction
-        price_patterns = [
-            r'[₹]\s*(\d+(?:,\d+)*)',
-            r'"price"[:\s]*"?(\d+(?:,\d+)*)',
-            r'₹(\d+(?:,\d+)*)',
-            r'Rs\.?\s*(\d+(?:,\d+)*)',
-            r'\bprice["\s]*[:=]\s*["\s]*(\d+(?:,\d+)*)',
-            r'MRP[:\s]*[₹Rs\.]*\s*(\d+(?:,\d+)*)',
-            r'current[_\s]*price["\s]*[:=]\s*["\s]*(\d+(?:,\d+)*)'
-        ]
-        
-        # Try selector-based extraction first
+        # Price extraction - enhanced
         price_selectors = {
-            'amazon': ['.a-price-whole', '.a-price .a-offscreen', '.a-price-range'],
-            'flipkart': ['._30jeq3', '._1_WHN1', '.CEmiEU'],
-            'meesho': ['.price', '.current-price'],
-            'myntra': ['.pdp-price', '.price-current'],
-            'ajio': ['.prod-price', '.price-current']
+            'amazon': ['.a-price-whole', '.a-price .a-offscreen', '.a-price-range', '#corePrice_feature_div .a-offscreen', '.apexPriceToPay'],
+            'flipkart': ['._30jeq3', '._1_WHN1', '.CEmiEU', '._16Jk6d'],
+            'meesho': ['.price', '.current-price', '.sc-iqHYGH'],
+            'myntra': ['.pdp-price', '.price-current', '.pdp-discount-price'],
+            'ajio': ['.prod-price', '.price-current', '.prod-sp']
         }
         
         if platform in price_selectors:
@@ -612,17 +608,32 @@ class ProductScraper:
                         text = element.get_text(strip=True)
                         price_match = re.search(r'(\d+(?:,\d+)*)', text)
                         if price_match:
-                            price_num = int(price_match.group(1).replace(',', ''))
-                            if 10 <= price_num <= 1000000:
-                                info['price'] = str(price_num)
-                                break
+                            price_str = price_match.group(1).replace(',', '')
+                            try:
+                                price_num = int(price_str)
+                                if 10 <= price_num <= 1000000:
+                                    info['price'] = str(price_num)
+                                    break
+                            except:
+                                continue
                     if info.get('price'):
                         break
                 except:
                     continue
         
-        # Fallback to regex patterns
+        # Fallback to regex patterns - enhanced
         if not info.get('price'):
+            price_patterns = [
+                r'[₹Rs]\s*(\d+(?:,\d+)*)',
+                r'"price"[:\s]*"?(\d+(?:,\d+)*)',
+                r'₹(\d+(?:,\d+)*)',
+                r'Rs\.?\s*(\d+(?:,\d+)*)',
+                r'\bprice["\s]*[:=]\s*["\s]*(\d+(?:,\d+)*)',
+                r'MRP[:\s]*[₹Rs\.]*\s*(\d+(?:,\d+)*)',
+                r'current[_\s]*price["\s]*[:=]\s*["\s]*(\d+(?:,\d+)*)',
+                r'offer[_\s]*price["\s]*[:=]\s*["\s]*(\d+(?:,\d+)*)',
+                r'discounted[_\s]*price["\s]*[:=]\s*["\s]*(\d+(?:,\d+)*)'
+            ]
             for pattern in price_patterns:
                 matches = re.findall(pattern, html, re.IGNORECASE)
                 for match in matches:
@@ -638,18 +649,18 @@ class ProductScraper:
         
         # Platform-specific extractions
         if platform == 'meesho':
-            # Extract sizes
+            # Extract sizes - enhanced
             size_patterns = [
-                r'\b(XS|S|M|L|XL|XXL|XXXL|2XL|3XL)\b',
-                r'\bSize[:\s]+(XS|S|M|L|XL|XXL|XXXL|2XL|3XL)\b'
+                r'\b(XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|5XL)\b',
+                r'\bSize[:\s]+(XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|5XL)\b',
+                r'sizesAvailable":\s*\[([^\]]+)\]'
             ]
             sizes = set()
             for pattern in size_patterns:
                 matches = re.findall(pattern, html, re.IGNORECASE)
                 for match in matches:
-                    sizes.add(match.upper())
-                    if len(sizes) >= 5:
-                        break
+                    size_list = [s.strip('" ').upper() for s in match.split(',')]
+                    sizes.update(size_list)
             
             if sizes:
                 info['sizes'] = sorted(list(sizes))
@@ -661,15 +672,26 @@ class ProductScraper:
                     info['pin'] = pin
                     break
         
-        # Extract brand from title
-        if info.get('title'):
+        # Extract brand from HTML or title
+        brand_selectors = ['.brand', '#bylineInfo', '.pdp-brand', 'meta[property="og:brand"]']
+        for selector in brand_selectors:
+            elements = soup.select(selector)
+            for element in elements:
+                text = element.get_text(strip=True) or element.get('content', '')
+                if text and text in KNOWN_BRANDS:
+                    info['brand'] = text
+                    break
+            if info.get('brand'):
+                break
+        
+        if not info.get('brand') and info.get('title'):
             title_lower = info['title'].lower()
             for brand in KNOWN_BRANDS:
                 if brand.lower() in title_lower:
                     info['brand'] = brand
                     break
         
-        # Extract gender from title
+        # Extract gender from title or HTML
         if info.get('title'):
             title_lower = info['title'].lower()
             for gender, patterns in GENDER_KEYWORDS.items():
@@ -685,10 +707,7 @@ class ProductScraper:
             for pattern in QUANTITY_PATTERNS:
                 match = re.search(pattern, info['title'], re.IGNORECASE)
                 if match:
-                    if len(match.groups()) > 0:
-                        info['quantity'] = match.group(1)
-                    else:
-                        info['quantity'] = match.group(0).strip()
+                    info['quantity'] = match.group(1) if match.groups() else match.group(0).strip()
                     break
         
         return info
@@ -699,7 +718,7 @@ class ProductScraper:
         if not title:
             return ''
         
-        # Remove platform-specific noise
+        # Enhanced noise patterns
         noise_patterns = [
             r'\s*-\s*Amazon\.in.*$',
             r'\s*:\s*Amazon\.in.*$',
@@ -717,7 +736,10 @@ class ProductScraper:
             r'₹\d+.*?off',
             r'\d+%.*?off',
             r'discount.*?\d+',
-            r'save.*?₹.*?\d+'
+            r'save.*?₹.*?\d+',
+            r'\s*Online in India.*$',
+            r'\s*Best Price.*$',
+            r'\s*-\s*Reviews & Ratings.*$'
         ]
         
         clean_title = title
@@ -731,26 +753,19 @@ class ProductScraper:
         promo_words = [
             'offer', 'deal', 'sale', 'discount', 'exclusive', 'limited', 'special',
             'mrp', 'price', 'rs', 'rupees', 'off', 'save', 'best', 'lowest',
-            'original', 'authentic', 'genuine', 'brand', 'new', 'latest'
+            'original', 'authentic', 'genuine', 'brand', 'new', 'latest', 'buy'
         ]
         words = clean_title.split()
-        filtered_words = []
-        
-        for word in words:
-            # Skip promotional words and price-related terms
-            if (word.lower() not in promo_words and 
-                not re.match(r'₹\d+', word) and 
-                not re.match(r'\d+%', word) and
-                not re.match(r'rs\.?\d+', word, re.IGNORECASE)):
-                filtered_words.append(word)
+        filtered_words = [word for word in words if word.lower() not in promo_words and 
+                          not re.match(r'₹\d+', word) and 
+                          not re.match(r'\d+%', word) and
+                          not re.match(r'rs\.?\d+', word, re.IGNORECASE)]
         
         clean_title = ' '.join(filtered_words)
         
         # Limit length smartly
-        if len(clean_title) > 60:
-            clean_title = clean_title[:60]
-            if ' ' in clean_title:
-                clean_title = clean_title.rsplit(' ', 1)[0] + '...'
+        if len(clean_title) > 80:
+            clean_title = clean_title[:80].rsplit(' ', 1)[0] + '...'
         
         return clean_title.strip()
 
@@ -771,45 +786,49 @@ class DealFormatter:
         brand = product_info.get('brand', '').strip()
         title = product_info.get('title', '').strip()
         
-        if brand and brand.lower() not in title.lower():
+        if brand:
             line_components.append(brand)
+            # Remove brand from title
+            if brand.lower() in title.lower():
+                title_words = title.split()
+                filtered_words = []
+                brand_words = brand.split()
+                i = 0
+                while i < len(title_words):
+                    if title_words[i:i+len(brand_words)].lower() == [w.lower() for w in brand_words]:
+                        i += len(brand_words)
+                        continue
+                    filtered_words.append(title_words[i])
+                    i += 1
+                title = ' '.join(filtered_words).strip()
         
         # Gender
         gender = product_info.get('gender', '').strip()
         if gender:
             line_components.append(gender)
+            # Remove gender from title to avoid duplicates
+            if gender.lower() in title.lower():
+                title_words = title.split()
+                filtered_words = []
+                gender_words = gender.split()
+                i = 0
+                while i < len(title_words):
+                    if title_words[i:i+len(gender_words)].lower() == [w.lower() for w in gender_words]:
+                        i += len(gender_words)
+                        continue
+                    filtered_words.append(title_words[i])
+                    i += 1
+                title = ' '.join(filtered_words).strip()
         
         # Quantity
         quantity = product_info.get('quantity', '').strip()
         if quantity:
             line_components.append(quantity)
+            # Simple removal for quantity
+            title = re.sub(r'\b' + re.escape(quantity) + r'\b', '', title, flags=re.IGNORECASE).strip()
         
         # Title (cleaned)
         if title:
-            # Remove brand from title if already added
-            if brand and brand.lower() in title.lower():
-                title_words = title.split()
-                filtered_words = []
-                brand_words = brand.lower().split()
-                
-                i = 0
-                while i < len(title_words):
-                    word = title_words[i].lower()
-                    if word in [b.lower() for b in brand_words]:
-                        # Skip brand words
-                        brand_match = True
-                        for j, brand_word in enumerate(brand_words):
-                            if i + j >= len(title_words) or title_words[i + j].lower() != brand_word.lower():
-                                brand_match = False
-                                break
-                        if brand_match:
-                            i += len(brand_words)
-                            continue
-                    filtered_words.append(title_words[i])
-                    i += 1
-                
-                title = ' '.join(filtered_words).strip()
-            
             line_components.append(title)
         else:
             line_components.append('Product Deal')
@@ -823,7 +842,7 @@ class DealFormatter:
         lines = []
         
         # First line: all components
-        first_line = ' '.join(line_components)
+        first_line = ' '.join([comp.strip() for comp in line_components if comp.strip()]).strip()
         lines.append(first_line)
         
         # Second line: clean URL
@@ -854,7 +873,7 @@ class DealFormatter:
         # Channel tag
         lines.append('@reviewcheckk')
         
-        return '\n'.join(lines)
+        return '\n'.join(lines).strip()
 
 class DealBot:
     """Main bot class"""
@@ -868,9 +887,9 @@ class DealBot:
         """Initialize session"""
         if not self.session:
             connector = aiohttp.TCPConnector(
-                limit=30,
-                limit_per_host=10,
-                ttl_dns_cache=300,
+                limit=20,
+                limit_per_host=5,
+                ttl_dns_cache=600,
                 use_dns_cache=True
             )
             timeout = aiohttp.ClientTimeout(total=30, connect=10)
@@ -902,25 +921,31 @@ class DealBot:
                 self.processed_messages.add(message_id)
                 
                 # Memory management
-                if len(self.processed_messages) > 200:
-                    old_messages = list(self.processed_messages)[:100]
-                    for old_msg in old_messages:
-                        self.processed_messages.discard(old_msg)
+                if len(self.processed_messages) > 500:
+                    self.processed_messages = set(list(self.processed_messages)[-200:])
                 
                 await self.initialize()
                 
                 # Extract text
                 text = message.text or message.caption or ''
                 if not text or len(text.strip()) < 5:
-                    return
+                    if not message.photo:
+                        return
+                    text = ''  # Proceed if photo but no text
                 
                 logger.info(f"Processing message: {text[:100]}...")
+                
+                # Get photo if present
+                photo_id = message.photo[-1].file_id if message.photo else None
                 
                 # Extract links
                 links = SmartLinkProcessor.extract_all_links(text)
                 
                 if not links:
                     logger.info("No links found")
+                    if photo_id:
+                        # If photo but no link, perhaps forward photo
+                        await context.bot.send_photo(update.effective_chat.id, photo=photo_id)
                     return
                 
                 logger.info(f"Found {len(links)} links")
@@ -963,53 +988,67 @@ class DealBot:
                         
                         # Brief delay
                         if len(links) > 1 and i < len(links) - 1:
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(1.5)
                         
                     except Exception as e:
                         logger.error(f"Error processing link {url}: {str(e)}")
-                        error_msg = f"Product Deal\n{url}\n\n@reviewcheckk"
+                        error_msg = f"Product Deal\n{clean_url or url}\n\n@reviewcheckk"
                         results.append(error_msg)
                         continue
                 
                 # Send results
+                chat_id = update.effective_chat.id
+                if photo_id:
+                    # Send photo first without caption if multiple results or long text
+                    await context.bot.send_photo(chat_id, photo=photo_id)
+                
                 for result in results:
                     try:
-                        await safe_send_message(
-                            update, 
-                            context, 
-                            result, 
-                            disable_web_page_preview=True
-                        )
+                        if photo_id and len(results) == 1 and len(result) < 1024:
+                            await context.bot.send_photo(
+                                chat_id,
+                                photo=photo_id,
+                                caption=result,
+                                disable_web_page_preview=True
+                            )
+                        else:
+                            await context.bot.send_message(
+                                chat_id,
+                                text=result,
+                                disable_web_page_preview=True
+                            )
                         
                         if len(results) > 1:
                             await asyncio.sleep(0.5)
                     except Exception as e:
                         logger.error(f"Failed to send result: {e}")
+                        await context.bot.send_message(chat_id, "❌ Error sending deal\n\n@reviewcheckk")
                         continue
                         
             except Exception as e:
                 logger.error(f"Error in process_message: {str(e)}")
                 try:
                     error_msg = "❌ Error processing message\n\n@reviewcheckk"
-                    await safe_send_message(update, context, error_msg)
+                    await context.bot.send_message(update.effective_chat.id, error_msg)
                 except:
                     pass
+            finally:
+                # Optional: cleanup session after each message to prevent leaks
+                # await self.cleanup()
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle start command"""
     msg = (
-        "🤖 *Deal Bot v2.0 Active!*\n\n"
-        "✅ Smart link detection & processing\n"
-        "✅ Automatic URL unshortening\n"
-        "✅ Clean affiliate link removal\n"
-        "✅ Accurate price & title extraction\n"
-        "✅ Brand, gender & quantity detection\n"
-        "✅ Meesho size & PIN support\n"
-        "✅ Strict deal format compliance\n\n"
+        "🤖 *Deal Bot v2.1 Active!*\n\n"
+        "✅ Enhanced link detection\n"
+        "✅ Improved price & title extraction\n"
+        "✅ Better error handling\n"
+        "✅ Image support in responses\n"
+        "✅ Strict format compliance\n\n"
         "📝 *Supported Platforms:*\n"
         "• Amazon • Flipkart • Meesho\n"
         "• Myntra • Ajio • Snapdeal\n\n"
-        "🔗 Send any product link and get perfectly formatted deals!\n\n"
+        "🔗 Send product links (with images optional) for formatted deals!\n\n"
         "@reviewcheckk"
     )
     await safe_send_message(update, context, msg, parse_mode=ParseMode.MARKDOWN)
@@ -1059,7 +1098,7 @@ async def safe_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 def main():
     """Main function"""
-    print("🚀 Starting Deal Bot v2.0...")
+    print("🚀 Starting Deal Bot v2.1...")
     
     try:
         # Create application
@@ -1079,7 +1118,7 @@ def main():
         # Add handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(MessageHandler(
-            filters.TEXT | filters.CAPTION, 
+            filters.TEXT | filters.CAPTION | filters.PHOTO, 
             bot.process_message
         ))
         
@@ -1092,7 +1131,7 @@ def main():
         
         def signal_handler(sig, frame):
             print("\n🛑 Shutting down bot...")
-            asyncio.create_task(bot.cleanup())
+            asyncio.run(bot.cleanup())
             sys.exit(0)
         
         signal.signal(signal.SIGINT, signal_handler)
@@ -1103,6 +1142,7 @@ def main():
         print("📡 Monitoring all channels, groups, and DMs")
         print("🔗 Processing product links with enhanced accuracy")
         print("📝 Strict deal format compliance enabled")
+        print("🖼️ Image support added")
         
         # Run bot
         application.run_polling(
