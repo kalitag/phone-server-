@@ -1,3 +1,5 @@
-aiohttp
-beautifulsoup4
-python-telegram-bot
+aiohttp==3.9.1
+beautifulsoup4==4.12.2
+python-telegram-bot==20.7
+pytesseract==0.3.10
+Pillow==10.1.0
