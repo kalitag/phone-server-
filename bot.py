@@ -187,7 +187,7 @@ class SmartLinkProcessor:
                         headers=headers
                     ) as response:
                         final_url = str(response.url)
-                        if final_url != current_url and len(final_url) > len(final_url):
+                        if final_url != current_url and len(final_url) > len(current_url):
                             logger.info(f"GET unshorten successful: {final_url}")
                             current_url = final_url
                             break
