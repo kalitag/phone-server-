@@ -1,111 +1,79 @@
 import logging
 import re
-import asyncio
-import aiohttp
-import pytesseract
-from io import BytesIO
-from PIL import Image
-from typing import Optional, Dict, List, Any, Set
+import requests
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
-from telegram.constants import ParseMode
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Configure logging
+# --- CONFIG ---
+BOT_TOKEN = "8327175937:AAGoWZPlDM_UX7efZv6_7vJMHDsrZ3-EyIA"
+DEFAULT_PIN = "110001"
+CHANNEL_TAG = "@reviewcheckk"
+
+# --- LOGGER ---
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
-logger = logging.getLogger(__name__)
 
-# Bot Configuration
-BOT_TOKEN = "8475626328:AAHpLsi5hL-1UfKGOdOWxQBHbDPyU6ExTG8"
-BOT_USERNAME = "@Py_hostbot"
+# --- HELPERS ---
+def clean_url(url: str) -> str:
+    try:
+        r = requests.head(url, allow_redirects=True, timeout=8)
+        return r.url
+    except:
+        return url
 
-# URL shorteners list
-SHORTENERS = [
-    'cutt.ly', 'spoo.me', 'amzn.to', 'amzn-to.co', 'fkrt.cc', 'bitli.in', 
-    'da.gd', 'wishlink.com', 'bit.ly', 'tinyurl.com', 'short.link', 
-    'ow.ly', 'is.gd', 't.co', 'goo.gl', 'rb.gy', 'tiny.cc', 'v.gd',
-    'x.co', 'buff.ly', 'short.gy', 'shorte.st', 'adf.ly', 'bc.vc',
-    'tinycc.com', 'shorturl.at', 'clck.ru', '0rz.tw', '1link.in'
-]
+def extract_title_price(url: str):
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
+        title = soup.title.string if soup.title else "Product"
+        title = re.sub(r"\s+", " ", title).strip()
 
-# Gender detection patterns
-GENDER_KEYWORDS = {
-    'Men': [
-        r'\bmen\b', r"\bmen's\b", r'\bmale\b', r'\bboy\b', r'\bboys\b', 
-        r'\bgents\b', r'\bgentleman\b', r'\bmasculine\b', r'\bmans\b'
-    ],
-    'Women': [
-        r'\bwomen\b', r"\bwomen's\b", r'\bfemale\b', r'\bgirl\b', r'\bgirls\b', 
-        r'\bladies\b', r'\blady\b', r'\bfeminine\b', r'\bwomens\b'
-    ],
-    'Kids': [
-        r'\bkids\b', r'\bchildren\b', r'\bchild\b', r'\bbaby\b', r'\binfant\b', 
-        r'\btoddler\b', r'\bteen\b', r'\bteenage\b', r'\bjunior\b', r'\byouth\b'
-    ]
-}
+        price = None
+        match = re.search(r"₹\s?(\d+)", r.text)
+        if match:
+            price = match.group(1)
 
-# Quantity patterns
-QUANTITY_PATTERNS = [
-    r'pack\s+of\s+(\d+)',
-    r'(\d+)\s*pack',
-    r'set\s+of\s+(\d+)',
-    r'(\d+)\s*pcs?',
-    r'(\d+)\s*pieces?',
-    r'combo\s+(\d+)',
-    r'(\d+)\s*pair',
-    r'multipack\s+(\d+)'
-]
+        return title, price
+    except Exception as e:
+        logging.error(f"Parse error: {e}")
+        return "Product", None
 
-# Known brands
-KNOWN_BRANDS = [
-    'Lakme', 'Maybelline', 'L\'Oreal', 'MAC', 'Revlon', 'Nykaa', 'Colorbar',
-    'Nike', 'Adidas', 'Puma', 'Reebok', 'Converse', 'Vans', 'Fila', 'Skechers',
-    'Samsung', 'Apple', 'OnePlus', 'Xiaomi', 'Realme', 'Oppo', 'Vivo', 'Mi',
-    'Zara', 'H&M', 'Forever21', 'Mango', 'Uniqlo', 'Gap', 'Levis', 'Wrangler',
-    'Mamaearth', 'Wow', 'Biotique', 'Himalaya', 'Patanjali', 'Dove', 'Nivea',
-    'Jockey', 'Calvin Klein', 'Tommy Hilfiger', 'Allen Solly', 'Peter England',
-    'Cadbury', 'Nestle', 'Britannia', 'Parle', 'Haldiram', 'Amul', 'ITC',
-    'Philips', 'Havells', 'Bajaj', 'Crompton', 'Syska', 'Wipro', 'Orient'
-]
+def format_message(title: str, price: str, url: str):
+    msg = f"{title}"
+    if price:
+        msg += f" @{price} rs"
+    msg += f"\n{url}\n"
+    msg += f"Size - All\nPin - {DEFAULT_PIN}\n\n{CHANNEL_TAG}"
+    return msg
 
-class ImageOCR:
-    """Extract text from images using OCR"""
-    
-    @staticmethod
-    async def extract_text_from_image(image_data: bytes) -> str:
-        """Extract text from image bytes"""
-        try:
-            image = Image.open(BytesIO(image_data))
-            # Convert to RGB if necessary
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            # Extract text using OCR
-            text = pytesseract.image_to_string(image)
-            return text.strip()
-        except Exception as e:
-            logger.error(f"OCR failed: {e}")
-            return ""
+# --- HANDLERS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 Bot active! Send any product link.")
 
-class SmartLinkProcessor:
-    """Smart link detection and processing"""
-    
-    @staticmethod
-    def extract_all_links(text: str) -> List[str]:
-        """Extract all URLs from text"""
-        if not text:
-            return []
-        
-        urls = []
-        
-        # Standard HTTP/HTTPS URLs
-        standard_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+(?=[.\s]|$)'
-        urls.extend(re.findall(standard_pattern, text, re.IGNORECASE))
-        
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    urls = re.findall(r"https?://\S+", text)
+    if not urls:
+        await update.message.reply_text("❌ No link found.")
+        return
+    for url in urls:
+        full_url = clean_url(url)
+        title, price = extract_title_price(full_url)
+        msg = format_message(title, price, full_url)
+        await update.message.reply_text(msg)
+
+# --- MAIN ---
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
         # Shortened URLs
         for shortener in SHORTENERS:
             pattern = rf'(?:https?://)?(?:{re.escape(shortener)})/[^\s<>"{{}}|\\^`\[\]]+'
