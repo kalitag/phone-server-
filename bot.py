@@ -1,123 +1,140 @@
+import logging
 import re
 import requests
 from bs4 import BeautifulSoup
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ==============================
+# =========================
 # CONFIG
-# ==============================
+# =========================
 BOT_TOKEN = "8327175937:AAGoWZPlDM_UX7efZv6_7vJMHDsrZ3-EyIA"
-BOT_USERNAME = "@Easy_uknowbot"
+PIN_DEFAULT = "110001"
+CHANNEL_TAG = "@reviewcheckk"
 
-SHORTENERS = [
-    "cutt.ly", "fkrt.cc", "amzn.to", "bitli.in", "spoo.me", "wishlink.com", "da.gd"
-]
+SHORTENERS = ["cutt.ly", "fkrt.cc", "amzn.to", "bitli.in", "spoo.me", "da.gd", "wishlink.com"]
 
-DEFAULT_PIN = "110001"
+# =========================
+# LOGGING
+# =========================
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-
-# ==============================
-# LINK CLEANUP
-# ==============================
+# =========================
+# HELPERS
+# =========================
 def unshorten_url(url: str) -> str:
-    """Expand short URLs to full product URLs"""
-    for shortener in SHORTENERS:
-        if shortener in url:
-            try:
-                resp = requests.get(url, allow_redirects=True, timeout=10)
-                return resp.url
-            except Exception:
-                return url
-    return url
-
-
-def clean_affiliate(url: str) -> str:
-    """Remove affiliate/ref query params"""
-    return re.sub(r"(\?|&)tag=[^&]*", "", url)
-
-
-# ==============================
-# SCRAPER
-# ==============================
-def scrape_product(url: str):
-    """Extract title + price from product page"""
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
+        s = requests.Session()
+        s.max_redirects = 5
+        resp = s.head(url, allow_redirects=True, timeout=10)
+        return resp.url
+    except:
+        return url
 
-        title = soup.find("meta", {"property": "og:title"})
-        if not title:
-            title = soup.find("title")
-        title = title["content"] if title and title.has_attr("content") else (title.text if title else "No Title")
-        title = re.sub(r"\s+", " ", title).strip()
+def clean_title(title: str) -> str:
+    if not title:
+        return ""
+    title = re.sub(r"Buy.*?Online|Latest Prices?|at Best Price.*", "", title, flags=re.I)
+    title = re.sub(r"\s+", " ", title).strip()
+    words = []
+    for w in title.split():
+        if w not in words:
+            words.append(w)
+    return " ".join(words)
 
-        # Price pattern
-        price_text = soup.text
-        price_match = re.findall(r"(₹|Rs\.?)\s?(\d[\d,]*)", price_text)
-        price = None
-        if price_match:
-            price = min([int(p[1].replace(",", "")) for p in price_match])
+def extract_price(text: str) -> str:
+    prices = re.findall(r"(?:₹|Rs\.?|INR)?\s?([\d,]+)", text)
+    if not prices:
+        return ""
+    nums = [int(p.replace(",", "")) for p in prices if p]
+    if not nums:
+        return ""
+    return str(min(nums))
 
-        return {"title": title, "price": price}
+def scrape_product(url: str) -> dict:
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(r.text, "lxml")
+
+        title = ""
+        if soup.find("title"):
+            title = soup.find("title").text
+        og = soup.find("meta", {"property": "og:title"})
+        if og and og.get("content"):
+            title = og["content"]
+
+        clean = clean_title(title)
+
+        price = extract_price(soup.get_text())
+
+        return {"title": clean, "price": price}
     except Exception as e:
-        return {"title": None, "price": None}
+        logger.error(f"Scrape error: {e}")
+        return {"title": "", "price": ""}
 
-
-# ==============================
-# FORMATTER
-# ==============================
 def format_message(url: str, data: dict) -> str:
-    title = data.get("title") or "No Title Found"
-    price = data.get("price")
-    price_text = f"@{price} rs" if price else ""
+    title = data.get("title", "")
+    price = data.get("price", "")
 
-    # Default message (Amazon/Flipkart/Myntra)
-    msg = f"{title} {price_text}\n{url}\n\n@reviewcheckk"
+    if "meesho.com" in url:
+        # Meesho style
+        msg = f"{title} @{price} rs\n{url}\n\nPin - {PIN_DEFAULT}\n\n{CHANNEL_TAG}"
+    elif any(k in url for k in ["amazon.", "amzn."]):
+        msg = f"{title} from @{price} rs\n{url}\n\n{CHANNEL_TAG}"
+    elif "flipkart" in url:
+        msg = f"{title} from @{price} rs\n{url}\n\n{CHANNEL_TAG}"
+    elif "myntra" in url:
+        msg = f"{title} from @{price} rs\n{url}\n\n{CHANNEL_TAG}"
+    else:
+        msg = f"{title} @{price} rs\n{url}\n\n{CHANNEL_TAG}"
 
-    # Meesho-specific
-    if "meesho" in url:
-        msg = f"{title} {price_text}\n{url}\n\nPin - {DEFAULT_PIN}\n\n@reviewcheckk"
+    return msg.strip()
 
-    return msg
-
-
-# ==============================
+# =========================
 # HANDLERS
-# ==============================
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Bot is active! Send me any product link.")
-
+    await update.message.reply_text("✅ Bot is live and ready!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    urls = re.findall(r"https?://\S+", text)
+    if not text:
+        return
+
+    urls = re.findall(r'(https?://\S+)', text)
     if not urls:
-        await update.message.reply_text("❌ No link found.")
         return
 
     for url in urls:
-        full_url = unshorten_url(url)
-        full_url = clean_affiliate(full_url)
+        # unshorten if needed
+        if any(s in url for s in SHORTENERS):
+            url = unshorten_url(url)
 
-        data = scrape_product(full_url)
-        msg = format_message(full_url, data)
+        # scrape product
+        data = scrape_product(url)
+        if not data["title"]:
+            await update.message.reply_text("❌ Unable to extract product info.")
+            continue
 
+        msg = format_message(url, data)
         await update.message.reply_text(msg)
 
-
-# ==============================
+# =========================
 # MAIN
-# ==============================
+# =========================
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    logger.info("🤖 Bot started...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
