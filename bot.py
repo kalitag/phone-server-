@@ -7,7 +7,7 @@ from urllib.parse import urlparse, parse_qs, urlunparse
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("8465346144:AAG9x6C3OCOpUhVz3-qEK1wBlACOdb0Bz_s")
 
 async def unshorten_url(url: str) -> str:
     try:
