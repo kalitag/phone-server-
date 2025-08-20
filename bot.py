@@ -181,9 +181,9 @@ def process_message(update: Update, context: CallbackContext):
         output += f"{clean}\n\n@reviewcheckk"
         
         update.message.reply_text(
-            output,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True
+    output,
+    parse_mode=None,  # ← This fixes the error
+    disable_web_page_preview=True
         )
         
     except Exception as e:
