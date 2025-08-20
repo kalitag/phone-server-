@@ -8,7 +8,7 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8465346144:AAG9x6C3OCOpUhVz3-qEK1wBlACOdb0Bz_s"
 
 SHORTENERS = ['fkrt.cc', 'amzn.to', 'spoo.me', 'cutt.ly', 'bitly.in', 'da.gd', 'wishlink.com']
 SUPPORTED_SITES = ['amazon', 'flipkart', 'meesho', 'myntra', 'ajio', 'snapdeal', 'wishlink']
