@@ -38,13 +38,13 @@ pip install -r requirements.txt
 3. **Set environment variables**
 ```bash
 # Linux/Mac
-export BOT_TOKEN="your-bot-token-here"
+export BOT_TOKEN="8465346144:AAG9x6C3OCOpUhVz3-qEK1wBlACOdb0Bz_s"
 
 # Windows
-set BOT_TOKEN=your-bot-token-here
+set BOT_TOKEN=8465346144:AAG9x6C3OCOpUhVz3-qEK1wBlACOdb0Bz_s
 
 # Or create a .env file (recommended)
-echo "BOT_TOKEN=your-bot-token-here" > .env
+echo "BOT_TOKEN=8465346144:AAG9x6C3OCOpUhVz3-qEK1wBlACOdb0Bz_s" > .env
 ```
 
 4. **Run the bot**
