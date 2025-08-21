@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""
+Unit tests for ReviewCheckk Bot components
+Run with: python -m pytest test_bot.py -v
+"""
+
+import pytest
+import asyncio
+from unittest.mock import Mock, patch, AsyncMock
+from bot import (
+    URLResolver, TitleCleaner, PriceExtractor, 
+    PinDetector, ResponseBuilder
+)
+
+
+class TestURLResolver:
+    """Test URL resolution functionality"""
+    
+    def test_extract_urls(self):
+        """Test URL extraction from text"""
+        resolver = URLResolver()
+        
+        # Test single URL
+        text = "Check this out: https://www.amazon.in/dp/B08N5WRWNW"
+        urls = resolver.extract_urls(text)
+        assert len(urls) == 1
+        assert urls[0] == "https://www.amazon.in/dp/B08N5WRWNW"
+        
+        # Test multiple URLs
+        text = "Products: https://amzn.to/123 and https://flipkart.com/p/456"
+        urls = resolver.extract_urls(text)
+        assert len(urls) == 2
+        
+        # Test URL with trailing punctuation
+        text = "See this: https://example.com/product."
+        urls = resolver.extract_urls(text)
+        assert urls[0] == "https://example.com/product"
+        
+        # Test no URLs
+        text = "No links here!"
+        urls = resolver.extract_urls(text)
+        assert len(urls) == 0
+    
+    @pytest.mark.asyncio
+    async def test_unshorten_url(self):
+        """Test URL unshortening"""
+        resolver = URLResolver()
+        
+        # Mock the request
+        with patch('bot.requests.get') as mock_get:
+            mock_response = Mock()
+            mock_response.url = "https://www.amazon.in/dp/final-product"
+            mock_get.return_value = mock_response
+            
+            result = await resolver.unshorten_url("https://amzn.to/short")
+            assert result == "https://www.amazon.in/dp/final-product"
+            
+        # Test non-shortener URL (should return as-is)
+        regular_url = "https://www.amazon.in/dp/direct"
+        result = await resolver.unshorten_url(regular_url)
+        assert result == regular_url
+    
+    def test_clean_url(self):
+        """Test URL cleaning (removing tracking params)"""
+        resolver = URLResolver()
+        
+        # Test removing tracking parameters
+        dirty_url = "https://www.amazon.in/dp/B08N5WRWNW?tag=affiliate123&utm_source=google"
+        clean = resolver.clean_url(dirty_url)
+        assert "tag=" not in clean
+        assert "utm_source=" not in clean
+        assert "B08N5WRWNW" in clean
+        
+        # Test preserving important parameters
+        url_with_params = "https://example.com/product?id=123&color=blue&ref=tracker"
+        clean = resolver.clean_url(url_with_params)
+        assert "id=123" in clean
+        assert "color=blue" in clean
+        assert "ref=" not in clean
+    
+    def test_is_ecommerce_url(self):
+        """Test e-commerce URL detection"""
+        resolver = URLResolver()
+        
+        # Valid e-commerce URLs
+        assert resolver.is_ecommerce_url("https://www.amazon.in/product")
+        assert resolver.is_ecommerce_url("https://flipkart.com/item")
+        assert resolver.is_ecommerce_url("https://meesho.com/product")
+        
+        # Invalid URLs
+        assert not resolver.is_ecommerce_url("https://google.com")
+        assert not resolver.is_ecommerce_url("https://example.com")
+
+
+class TestTitleCleaner:
+    """Test title cleaning functionality"""
+    
+    def test_clean_title_basic(self):
+        """Test basic title cleaning"""
+        cleaner = TitleCleaner()
+        
+        # Test removing site names and fluff
+        dirty = "Nike Sports Shoes - Buy Online at Best Price | Amazon.in"
+        clean = cleaner.clean_title(dirty)
+        assert "Amazon" not in clean
+        assert "Buy Online" not in clean
+        assert "Nike" in clean
+        
+        # Test with brackets
+        dirty = "Samsung Phone (8GB RAM) [Best Deal]"
+        clean = cleaner.clean_title(dirty)
+        assert "[" not in clean
+        assert "]" not in clean
+        assert "(" not in clean
+        assert ")" not in clean
+    
+    def test_clean_title_clothing(self):
+        """Test clothing-specific title cleaning"""
+        cleaner = TitleCleaner()
+        
+        # Test with gender detection
+        title = "Adidas Men's Sports T-Shirt Pack of 3"
+        clean = cleaner.clean_title(title, is_clothing=True)
+        assert "Adidas" in clean
+        assert "Men" in clean or "men" in clean.lower()
+    
+    def test_is_valid_title(self):
+        """Test title validation"""
+        cleaner = TitleCleaner()
+        
+        # Valid titles
+        assert cleaner.is_valid_title("Nike Shoes")
+        assert cleaner.is_valid_title("Product Name")
+        
+        # Invalid titles
+        assert not cleaner.is_valid_title("")
+        assert not cleaner.is_valid_title("xx")
+        assert not cleaner.is_valid_title("zzzzzzz")  # No vowels
+        assert not cleaner.is_valid_title("aaaaaaaaa")  # Repeated chars
+
+
+class TestPriceExtractor:
+    """Test price extraction functionality"""
+    
+    def test_extract_price_from_text(self):
+        """Test price extraction from text"""
+        extractor = PriceExtractor()
+        
+        # Test with ₹ symbol
+        assert extractor.extract_price_from_text("Price: ₹1,999") == "1999"
+        
+        # Test with Rs
+        assert extractor.extract_price_from_text("Rs. 299 only") == "299"
+        
+        # Test with @ symbol
+        assert extractor.extract_price_from_text("@599") == "599"
+        
+        # Test with comma
+        assert extractor.extract_price_from_text("₹10,000") == "10000"
+        
+        # Test no price
+        assert extractor.extract_price_from_text("No price here") is None
+
+
+class TestPinDetector:
+    """Test PIN detection functionality"""
+    
+    def test_extract_pin(self):
+        """Test PIN extraction"""
+        detector = PinDetector()
+        
+        # Valid PIN
+        assert detector.extract_pin("Deliver to 400001") == "400001"
+        
+        # Multiple numbers (should get 6-digit)
+        assert detector.extract_pin("Order 123 to 560001 today") == "560001"
+        
+        # No PIN (default)
+        assert detector.extract_pin("No pin here") == "110001"
+        
+        # Empty text
+        assert detector.extract_pin("") == "110001"
+
+
+class TestResponseBuilder:
+    """Test response building functionality"""
+    
+    def test_build_response_basic(self):
+        """Test basic response building"""
+        builder = ResponseBuilder()
+        
+        response = builder.build_response(
+            title="Nike Shoes",
+            price="2999",
+            url="https://www.amazon.in/product"
+        )
+        
+        assert "Nike Shoes @2999 rs" in response
+        assert "https://www.amazon.in/product" in response
+        assert "@reviewcheckk" in response
+    
+    def test_build_response_no_price(self):
+        """Test response with no price"""
+        builder = ResponseBuilder()
+        
+        response = builder.build_response(
+            title="Product Name",
+            price=None,
+            url="https://example.com"
+        )
+        
+        assert "@ rs" in response
+        assert "@reviewcheckk" in response
+    
+    def test_build_response_meesho(self):
+        """Test Meesho-specific response"""
+        builder = ResponseBuilder()
+        
+        response = builder.build_response(
+            title="Women Kurti",
+            price="499",
+            url="https://meesho.com/product",
+            is_meesho=True,
+            sizes="S, M, L",
+            pin="400001"
+        )
+        
+        assert "Women Kurti @499 rs" in response
+        assert "Size - S, M, L" in response
+        assert "Pin - 400001" in response
+        assert "@reviewcheckk" in response
+    
+    def test_build_response_price_range(self):
+        """Test response with price range"""
+        builder = ResponseBuilder()
+        
+        response = builder.build_response(
+            title="Product",
+            price="299-599",
+            url="https://example.com"
+        )
+        
+        assert "from @299 rs" in response
+
+
+@pytest.fixture
+def mock_telegram_update():
+    """Create a mock Telegram update for testing"""
+    update = Mock()
+    update.message = Mock()
+    update.message.text = "Check this: https://www.amazon.in/product @299"
+    update.message.caption = None
+    update.message.photo = None
+    update.message.reply_text = AsyncMock()
+    return update
+
+
+@pytest.fixture
+def mock_context():
+    """Create a mock context for testing"""
+    context = Mock()
+    return context
+
+
+# Integration test example
+@pytest.mark.asyncio
+async def test_bot_integration(mock_telegram_update, mock_context):
+    """Test bot message processing integration"""
+    from bot import ReviewCheckkBot
+    
+    bot = ReviewCheckkBot()
+    
+    with patch.object(bot.url_resolver, 'unshorten_url', return_value="https://www.amazon.in/product"):
+        with patch.object(bot.title_cleaner, 'extract_title_from_page', return_value="Nike Shoes"):
+            # Process the message
+            await bot.process_message(mock_telegram_update, mock_context)
+            
+            # Verify reply was called
+            mock_telegram_update.message.reply_text.assert_called()
+            
+            # Check the response format
+            call_args = mock_telegram_update.message.reply_text.call_args
+            response_text = call_args[0][0]
+            
+            assert "@reviewcheckk" in response_text
+            assert "Nike" in response_text
+
+
+if __name__ == "__main__":
+    # Run tests
+    pytest.main([__file__, "-v"])
