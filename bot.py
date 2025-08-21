@@ -18,9 +18,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration from environment
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ALLOWED_CHAT_IDS = set(map(int, os.environ.get("ALLOWED_CHAT_IDS", "").split(','))) if os.environ.get("ALLOWED_CHAT_IDS") else None
+# Configuration
+BOT_TOKEN = "8465346144:AAG9x6C3OCOpUhVz3-qEK1wBlACOdb0Bz_s"
 
 # Supported domains and shorteners
 SUPPORTED_DOMAINS = {
