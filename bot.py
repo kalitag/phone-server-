@@ -21,10 +21,20 @@ logger = logging.getLogger(__name__)
 # Configuration
 BOT_TOKEN = "8465346144:AAG9x6C3OCOpUhVz3-qEK1wBlACOdb0Bz_s"
 
+# Handle ALLOWED_CHAT_IDS with proper error handling
+ALLOWED_CHAT_IDS = None
+try:
+    allowed_chats = os.environ.get("ALLOWED_CHAT_IDS")
+    if allowed_chats:
+        ALLOWED_CHAT_IDS = set(map(int, allowed_chats.split(',')))
+except (ValueError, TypeError) as e:
+    logger.warning(f"Error parsing ALLOWED_CHAT_IDS: {e}. All chats will be allowed.")
+
 # Supported domains and shorteners
 SUPPORTED_DOMAINS = {
     "amazon.in", "flipkart.com", "meesho.com", "myntra.com", "ajio.com",
-    "snapdeal.com", "nykaa.com", "purplle.com", "firstcry.com", "tatacliq.com"
+    "snapdeal.com", "nykaa.com", "purplle.com", "firstcry.com", "tatacliq.com",
+    "wishlink.com"  # Added based on your example
 }
 
 SHORTENERS = {
@@ -123,7 +133,7 @@ class TitleCleaner:
     def _clean_title(title: str) -> str:
         """Clean and format title"""
         # Remove fluff words
-        fluff_words = {'buy', 'online', 'india', 'official', 'store', 'best', 'price', 'deal'}
+        fluff_words = {'buy', 'online', 'india', 'official', 'store', 'best', 'price', 'deal', 'off'}
         words = [word for word in title.split() if word.lower() not in fluff_words]
         
         # Limit word count and ensure proper casing
@@ -198,6 +208,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming messages"""
     # Check if chat is allowed
     if ALLOWED_CHAT_IDS and update.effective_chat.id not in ALLOWED_CHAT_IDS:
+        logger.warning(f"Chat ID {update.effective_chat.id} not in allowed list")
         return
     
     try:
