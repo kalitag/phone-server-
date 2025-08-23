@@ -1,15 +1,13 @@
-import os
+import asyncio
 import re
 import logging
-import asyncio
-from typing import List, Optional, Tuple, Set, Dict, Any
-from urllib.parse import urlparse, parse_qs, urlunparse, quote
+from urllib.parse import urlparse, parse_qs, urlunparse
+from typing import Optional, List, Dict, Tuple
 import requests
-from telegram import Update, InputMediaPhoto
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
-from telegram.constants import ParseMode
 from bs4 import BeautifulSoup
-import html
+from telegram import Update, Message
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.constants import ParseMode
 
 # Configure logging
 logging.basicConfig(
@@ -18,111 +16,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration from environment
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8465346144:AAG9x6C3OCOpUhVz3-qEK1wBlACOdb0Bz_s")
-
-# Handle ALLOWED_CHAT_IDS with proper error handling
-ALLOWED_CHAT_IDS = None
-try:
-    allowed_chats = os.environ.get("ALLOWED_CHAT_IDS")
-    if allowed_chats:
-        ALLOWED_CHAT_IDS = set(map(int, allowed_chats.split(',')))
-except (ValueError, TypeError) as e:
-    logger.warning(f"Error parsing ALLOWED_CHAT_IDS: {e}. All chats will be allowed.")
-
-# Supported domains and shorteners
-SUPPORTED_DOMAINS = {
-    "amazon.in", "flipkart.com", "meesho.com", "myntra.com", "ajio.com",
-    "snapdeal.com", "nykaa.com", "purplle.com", "firstcry.com", "tatacliq.com",
-    "wishlink.com"
-}
-
-SHORTENERS = {
-    "amzn.to", "fkrt.it", "fkrt.cc", "spoo.me", "bit.ly", "bitli.in", 
-    "cutt.ly", "da.gd", "wishlink.com", "tinyurl.com", "t.c", "goo.gl",
-    "shorte.st", "ow.ly", "tiny.cc", "is.gd", "cli.gs", "yep.it", "pic.gd",
-    "v.gd", "tr.im", "qr.net", "1url.com", "t.co", "bit.do", "u.to", "j.mp",
-    "b.link", "tiny.pl", "cutt.us", "x.co", "prettylinkpro.com", "clicky.me",
-    "shorl.com", "short.io", "share.url", "link.tl", "shrtco.de", "riz.gy",
-    "tinyurl.com", "short.cm", "klck.me", "q.gs", "viralurl.com", "zzb.bz",
-    "link.zip", "shrunken.com", "spoo.me"
-}
-
-# Priority brands - must be lowercase for case-insensitive matching
-PRIORITY_BRANDS = {
-    "nike", "adidas", "puma", "apple", "samsung", "boat", "jbl", 
-    "dettol", "vivel", "dove", "lakme", "maybelline", "philips", 
-    "realme", "redmi", "oneplus", "levi's", "h&m", "zara", "forever21",
-    "lee", "wrangler", "us polo", "allen solly", "van heusen", "peter england",
-    "arrow", "woodland", "bata", "liberty", "red tape", "metro", "max",
-    "pepe jeans", "flying machine", "killer", "being human", "fabindia",
-    "biba", "w", "global desi", "anouk", "soch", "manyavar", "raymond",
-    "blackberrys", "john players", "fastrack", "titan", "sonata", "casio",
-    "fossil", "skmei", "noise", "boAt", "ptron", "realme", "oppo", "vivo",
-    "xiaomi", "oneplus", "motorola", "lenovo", "asus", "hp", "dell", "canon",
-    "nikon", "lg", "sony", "whirlpool", "lg", "samsung", "ifb", "voltas",
-    "lloyd", "carrier", "blue star", "havells", "philips", "crompton", "bajaj",
-    "usha", "prestige", "pigeon", "butterfly", "milton", "tupperware", "signoraware"
-}
-
-# Fluff words to remove from titles
-FLUFF_WORDS = {
-    'buy', 'shop', 'online', 'india', 'official', 'store', 'best', 'price', 
-    'deal', 'off', 'sale', 'discount', 'offer', 'amazon', 'flipkart', 'meesho',
-    'myntra', 'ajio', 'snapdeal', 'nykaa', 'purplle', 'firstcry', 'tatacliq',
-    'wishlink', 'store', 'shopping', 'website', 'site', 'app', 'check', 'now',
-    'hurry', 'limited', 'time', 'stock', 'available', 'new', 'latest', 'trending',
-    'popular', 'bestseller', 'bestselling', 'hot', 'featured', 'special', 'only',
-    'just', 'lowest', 'cheap', 'affordable', 'premium', 'quality', 'genuine',
-    'authentic', 'original', 'branded', 'style', 'fashion', 'collection', 'design',
-    'perfect', 'ideal', 'great', 'excellent', 'amazing', 'awesome', 'wonderful',
-    'nice', 'good', 'perfect', 'unique', 'exclusive', 'free', 'shipping', 'delivery',
-    'cod', 'cash', 'on', 'exchange', 'return', 'warranty', 'guarantee', 'assured',
-    'trusted', 'rated', 'reviews', 'ratings', 'stars', 'verified', 'certified'
-}
-
-# Gender keywords
-GENDER_KEYWORDS = {'men', 'women', 'boys', 'girls', 'kids', 'unisex', 'mens', 'womens'}
-
 class URLResolver:
+    """Handle URL unshortening and cleaning"""
+    
+    SHORTENERS = [
+        'amzn.to', 'fkrt.cc', 'spoo.me', 'wishlink.com', 'bitli.in', 
+        'da.gd', 'cutt.ly', 'bit.ly', 'tinyurl.com', 'goo.gl', 't.co',
+        'short.me', 'u.to', 'ow.ly', 'tiny.cc', 'is.gd'
+    ]
+    
+    TRACKING_PARAMS = [
+        'tag', 'ref', 'refRID', 'pf_rd_r', 'pf_rd_p', 'pf_rd_m', 
+        'pf_rd_t', 'pf_rd_s', 'pf_rd_i', 'utm_source', 'utm_medium', 
+        'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid',
+        'mc_cid', 'mc_eid', '_gl', 'igshid', 'si'
+    ]
+    
+    @staticmethod
+    def detect_links(text: str) -> List[str]:
+        """Extract all URLs from text"""
+        url_pattern = r'https?://(?:[-\w.])+(?::[0-9]+)?(?:/(?:[\w/_.])*)?(?:\?(?:[\w&=%.])*)?(?:#(?:[\w.])*)?'
+        return re.findall(url_pattern, text)
+    
+    @staticmethod
+    def is_shortener(url: str) -> bool:
+        """Check if URL is from a shortening service"""
+        domain = urlparse(url).netloc.lower()
+        return any(shortener in domain for shortener in URLResolver.SHORTENERS)
+    
     @staticmethod
     async def unshorten_url(url: str) -> str:
-        """Resolve shortened URLs with proper error handling"""
+        """Resolve shortened URL to final destination"""
         try:
-            # Skip if already a full URL
-            parsed = urlparse(url)
-            if parsed.netloc.replace('www.', '') not in SHORTENERS:
-                return url
-                
-            response = await asyncio.to_thread(
-                requests.get,
-                url,
-                timeout=3,
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                },
-                allow_redirects=True
-            )
-            return response.url
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+            
+            def make_request():
+                response = requests.get(url, headers=headers, allow_redirects=True, timeout=2.5)
+                return response.url
+            
+            final_url = await asyncio.to_thread(make_request)
+            return URLResolver.clean_url(final_url)
+            
         except Exception as e:
             logger.warning(f"Failed to unshorten URL {url}: {e}")
-            return url
-
-    @staticmethod
-    def is_supported_domain(url: str) -> bool:
-        """Check if domain is supported"""
-        try:
-            domain = urlparse(url).netloc.lower()
-            domain = domain.replace('www.', '')
-            return any(supported_domain in domain for supported_domain in SUPPORTED_DOMAINS)
-        except:
-            return False
-
+            return URLResolver.clean_url(url)
+    
     @staticmethod
     def clean_url(url: str) -> str:
         """Remove tracking parameters from URL"""
@@ -130,527 +70,531 @@ class URLResolver:
             parsed = urlparse(url)
             query_params = parse_qs(parsed.query)
             
-            # Parameters to keep (domain specific)
-            keep_params = []
-            if 'amazon' in parsed.netloc:
-                keep_params = ['id', 'qid', 'keywords']
-            elif 'flipkart' in parsed.netloc:
-                keep_params = ['pid', 'marketplace']
-            elif 'meesho' in parsed.netloc:
-                keep_params = ['id', 'search']
-            elif 'myntra' in parsed.netloc:
-                keep_params = ['id', 'p']
+            # Remove tracking parameters
+            cleaned_params = {
+                k: v for k, v in query_params.items() 
+                if k not in URLResolver.TRACKING_PARAMS
+            }
             
-            # Filter parameters
-            filtered_params = {}
-            for key, values in query_params.items():
-                if (key in keep_params or 
-                    not any(tracking in key.lower() for tracking in 
-                    ['utm_', 'ref', 'aff', 'pid', 'camp', 'gclid', 'fbclid', 
-                     'tracking', 'source', 'medium', 'term', 'content', 'cid'])):
-                    filtered_params[key] = values[0]
+            # Rebuild query string
+            if cleaned_params:
+                query_string = '&'.join(f"{k}={v[0]}" for k, v in cleaned_params.items())
+                cleaned = parsed._replace(query=query_string)
+            else:
+                cleaned = parsed._replace(query='')
             
-            # Rebuild URL
-            clean_url = urlunparse((
-                parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                '&'.join([f"{k}={v}" for k, v in filtered_params.items()]),
-                parsed.fragment
-            ))
+            return urlunparse(cleaned)
             
-            return clean_url
-        except Exception as e:
-            logger.warning(f"Error cleaning URL {url}: {e}")
+        except Exception:
             return url
 
 class TitleCleaner:
-    @staticmethod
-    def extract_title(html_content: str, url: str, message_text: str) -> str:
-        """Extract and clean product title with multiple fallbacks"""
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            # Try multiple sources in priority order
-            title = None
-            
-            # 1. Try og:title
-            og_title = soup.find('meta', property='og:title')
-            if og_title and og_title.get('content'):
-                title = og_title['content']
-            
-            # 2. Try twitter:title
-            if not title:
-                twitter_title = soup.find('meta', attrs={'name': 'twitter:title'})
-                if twitter_title and twitter_title.get('content'):
-                    title = twitter_title['content']
-            
-            # 3. Try <title> tag
-            if not title:
-                title_tag = soup.find('title')
-                if title_tag:
-                    title = title_tag.get_text()
-            
-            # 4. Try h1 with common product title classes
-            if not title:
-                for selector in ['h1', '.product-title', '.title', '.productName', 
-                                '[data-qa="product-title"]', '.pdp-title', '.pdp-name']:
-                    title_el = soup.select_one(selector)
-                    if title_el:
-                        title = title_el.get_text()
-                        if title and len(title) > 10:
-                            break
-            
-            # 5. Fallback to URL or message text
-            if not title or len(title.strip()) < 5:
-                title = TitleCleaner._extract_from_url(url) or message_text[:100]
-            
-            # Clean the title
-            return TitleCleaner._clean_title(title, url)
-            
-        except Exception as e:
-            logger.error(f"Error extracting title: {e}")
-            return TitleCleaner._extract_from_url(url) or "Product"
-
-    @staticmethod
-    def _extract_from_url(url: str) -> str:
-        """Extract product name from URL path"""
-        try:
-            parsed = urlparse(url)
-            path_parts = [p for p in parsed.path.split('/') if p and not p.isdigit()]
-            if path_parts:
-                # Take the last meaningful part
-                last_part = path_parts[-1]
-                # Replace hyphens with spaces and title case
-                return last_part.replace('-', ' ').replace('_', ' ').title()
-            return ""
-        except:
-            return ""
-
-    @staticmethod
-    def _clean_title(raw_title: str, url: str = "") -> str:
-        """Clean and format title according to rules"""
-        try:
-            # Decode HTML entities
-            title = html.unescape(raw_title)
-            
-            # Remove extra spaces and special characters but keep basic punctuation
-            title = re.sub(r'[^\w\s\-\.&+]', ' ', title)
-            title = re.sub(r'\s+', ' ', title).strip()
-            
-            # Convert to lowercase for processing
-            lower_title = title.lower()
-            
-            # Remove site names and fluff words
-            words = []
-            for word in title.split():
-                lower_word = word.lower()
-                # Skip fluff words and site names
-                if (lower_word not in FLUFF_WORDS and 
-                    not any(site in lower_word for site in SUPPORTED_DOMAINS) and
-                    len(lower_word) > 1):  # Skip single letters except for sizes
-                    words.append(word)
-            
-            # Reconstruct title
-            title = ' '.join(words)
-            
-            # Extract and prioritize brand
-            brand = TitleCleaner._extract_brand(title, url)
-            if brand:
-                # Remove brand from title to avoid duplication
-                title = re.sub(re.escape(brand), '', title, flags=re.IGNORECASE).strip()
-                # Place brand at the beginning
-                title = f"{brand.title()} {title}"
-            
-            # Extract quantity and place it appropriately
-            quantity = TitleCleaner._extract_quantity(title)
-            if quantity:
-                # Remove quantity from title to avoid duplication
-                title = re.sub(re.escape(quantity), '', title, flags=re.IGNORECASE).strip()
-                # Place quantity after brand for non-clothing, after gender for clothing
-                if any(gender in title.lower() for gender in GENDER_KEYWORDS):
-                    # Find position of gender term and insert quantity after it
-                    words = title.split()
-                    for i, word in enumerate(words):
-                        if word.lower() in GENDER_KEYWORDS:
-                            words.insert(i+1, quantity)
-                            title = ' '.join(words)
-                            break
-                    else:
-                        title = f"{title} {quantity}"
-                else:
-                    title = f"{title} {quantity}"
-            
-            # Limit word count (6-8 words)
-            words = title.split()
-            if len(words) > 8:
-                title = ' '.join(words[:8])
-            
-            # Final cleanup
-            title = re.sub(r'\s+', ' ', title).strip()
-            
-            # Validate title isn't nonsense
-            if not TitleCleaner._is_valid_title(title):
-                # Fallback to URL extraction
-                url_title = TitleCleaner._extract_from_url(url)
-                if url_title and TitleCleaner._is_valid_title(url_title):
-                    title = url_title
-                else:
-                    title = "Quality Product"
-            
-            return title
-            
-        except Exception as e:
-            logger.error(f"Error cleaning title '{raw_title}': {e}")
-            return "Product"
-
-    @staticmethod
-    def _extract_brand(title: str, url: str = "") -> Optional[str]:
-        """Extract brand from title or URL"""
-        try:
-            # Check against priority brands (case insensitive)
-            lower_title = title.lower()
-            for brand in PRIORITY_BRANDS:
-                if brand.lower() in lower_title:
-                    return brand
-            
-            # Try to extract from URL
-            if url:
-                parsed = urlparse(url)
-                domain = parsed.netloc.lower()
-                for brand in PRIORITY_BRANDS:
-                    if brand.lower() in domain:
-                        return brand
-            
-            # Try to extract from title (first significant word)
-            words = title.split()
-            if words and len(words[0]) > 2 and words[0].isalpha():
-                return words[0]
-                
-            return None
-        except:
-            return None
-
-    @staticmethod
-    def _extract_quantity(text: str) -> Optional[str]:
-        """Extract quantity information from text"""
-        patterns = [
-            r'\b(\d+(?:ml|g|kg|l|pcs|pc|pack|packs|set|sets))\b',
-            r'\b(pack of \d+)\b',
-            r'\b(\d+\s*[x×]\s*\d+\s*[a-zA-Z]*)\b',
-            r'\b(combo of \d+)\b',
-            r'\b(bundle of \d+)\b',
-            r'\b(\d+\s*-\s*pack)\b',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return match.group(1)
-        
-        return None
-
-    @staticmethod
-    def _is_valid_title(title: str) -> bool:
-        """Validate that title isn't nonsense"""
-        if not title or len(title) < 3:
-            return False
-            
-        # Check for repeated characters (like "aaaaa")
-        if re.search(r'(.)\1{3,}', title.lower()):
-            return False
-            
-        # Check for at least one vowel in first few words
-        words = title.split()[:3]
-        if words:
-            has_vowel = any(any(vowel in word.lower() for vowel in 'aeiou') for word in words)
-            if not has_vowel:
-                return False
-                
-        # Check for reasonable word lengths
-        for word in title.split():
-            if len(word) > 20:  # Unusually long word
-                return False
-                
-        return True
-
-class PriceExtractor:
-    @staticmethod
-    def extract_price(html_content: str, message_text: str) -> Optional[str]:
-        """Extract price from HTML or message text with priority to message"""
-        try:
-            # First try message text (highest priority)
-            message_price = PriceExtractor._find_price_in_text(message_text)
-            if message_price:
-                return message_price
-            
-            # Then try HTML content
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            # Try multiple selectors and patterns
-            price_selectors = [
-                'meta[property="og:price:amount"]',
-                'meta[property="product:price:amount"]',
-                'span.price', 
-                'span.product-price',
-                'span.offer-price',
-                'span.selling-price',
-                '.pdp-price',
-                '[data-qa="product-price"]',
-                '.productPrice',
-                '.price'
-            ]
-            
-            for selector in price_selectors:
-                try:
-                    price_elements = soup.select(selector)
-                    for element in price_elements:
-                        price_text = element.get('content') or element.get_text()
-                        price = PriceExtractor._find_price_in_text(price_text)
-                        if price:
-                            return price
-                except:
-                    continue
-            
-            # Try JSON-LD data
-            json_ld = soup.find('script', type='application/ld+json')
-            if json_ld:
-                try:
-                    import json
-                    data = json.loads(json_ld.string)
-                    if isinstance(data, dict) and 'offers' in data:
-                        offers = data['offers']
-                        if isinstance(offers, dict) and 'price' in offers:
-                            return str(offers['price']).split('.')[0]  # Remove decimals
-                        elif isinstance(offers, list) and offers and 'price' in offers[0]:
-                            return str(offers[0]['price']).split('.')[0]
-                except:
-                    pass
-                    
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error extracting price: {e}")
-            return None
-
-    @staticmethod
-    def _find_price_in_text(text: str) -> Optional[str]:
-        """Find price in text using regex"""
-        try:
-            # Handle price ranges (take the lower price)
-            range_pattern = r'(?:₹|Rs?\.?\s*)(\d[\d,]*)\s*(?:-|to|–)\s*(?:₹|Rs?\.?\s*)(\d[\d,]*)'
-            range_match = re.search(range_pattern, text, re.IGNORECASE)
-            if range_match:
-                return range_match.group(1).replace(',', '')
-            
-            # Find single price
-            matches = re.findall(r'(?:₹|Rs?\.?\s*)(\d[\d,]*)', text, re.IGNORECASE)
-            if matches:
-                # Take the first match and remove commas
-                return matches[0].replace(',', '')
-                
-            return None
-        except:
-            return None
-
-class MeeshoHandler:
-    @staticmethod
-    def extract_size(html_content: str, message_text: str) -> str:
-        """Extract size information for Meesho products"""
-        try:
-            # First check message text
-            size_patterns = [
-                r'\b(S|M|L|XL|XXL|XXXL|2XL|3XL|4XL)\b',
-                r'\b(28|30|32|34|36|38|40|42|44)\b',
-                r'\b(one\s*size|onesize|os)\b',
-                r'\b(regular|free\s*size)\b'
-            ]
-            
-            sizes_found = set()
-            for pattern in size_patterns:
-                sizes = re.findall(pattern, message_text, re.IGNORECASE)
-                if sizes:
-                    sizes_found.update(s.upper() for s in sizes)
-            
-            if sizes_found:
-                return f"Size - {', '.join(sorted(sizes_found))}"
-            
-            # Then check HTML content
-            soup = BeautifulSoup(html_content, 'html.parser')
-            size_selectors = ['.size-variant', '.size-button', '.size', '.variant']
-            
-            for selector in size_selectors:
-                try:
-                    size_elements = soup.select(selector)
-                    for element in size_elements:
-                        size_text = element.get_text().strip()
-                        if re.match(r'^\b(S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|\d{2})\b$', size_text, re.IGNORECASE):
-                            sizes_found.add(size_text.upper())
-                except:
-                    continue
-            
-            if sizes_found:
-                return f"Size - {', '.join(sorted(sizes_found))}"
-            
-            return "Size - All"
-            
-        except Exception as e:
-            logger.error(f"Error extracting size: {e}")
-            return "Size - All"
-
-    @staticmethod
-    def extract_pin(message_text: str) -> str:
-        """Extract PIN code from message text"""
-        try:
-            # Look for 6-digit PIN codes
-            pin_match = re.search(r'\b(\d{6})\b', message_text)
-            if pin_match:
-                return f"Pin - {pin_match.group(1)}"
-            
-            return "Pin - 110001"
-        except:
-            return "Pin - 110001"
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming messages"""
-    # Check if chat is allowed
-    if ALLOWED_CHAT_IDS and update.effective_chat.id not in ALLOWED_CHAT_IDS:
-        logger.warning(f"Chat ID {update.effective_chat.id} not in allowed list")
-        return
+    """Extract and clean product titles"""
     
-    try:
-        # Extract text and entities from message
-        message = update.effective_message
-        text = message.text or message.caption or ""
-        entities = message.entities or message.caption_entities or []
-        
-        # Find all URLs in the message
-        urls = []
-        for entity in entities:
-            if entity.type == "url" or entity.type == "text_link":
-                url = entity.url if hasattr(entity, 'url') else text[entity.offset:entity.offset + entity.length]
-                urls.append(url)
-        
-        # Also look for URLs in plain text
-        text_urls = re.findall(r'https?://\S+', text)
-        urls.extend(text_urls)
-        
-        # Remove duplicates
-        urls = list(set(urls))
-        
-        if not urls:
-            # Check if this is a photo without caption but might have text in the image
-            if message.photo:
-                await message.reply_photo(
-                    photo=message.photo[-1].file_id,
-                    caption="No product link provided\n\n@reviewcheckk"
-                )
-            else:
-                await message.reply_text("❌ No product links found")
-            return
-        
-        # Process each URL
-        processed_count = 0
-        for url in urls:
-            success = await process_single_url(url, message, context)
-            if success:
-                processed_count += 1
-                
-        if processed_count == 0:
-            await message.reply_text("❌ Unsupported or invalid product link")
+    FLUFF_WORDS = [
+        'best offer', 'trending', 'stylish', 'buy online', 'india', 'amazon.in',
+        'flipkart', 'official store', 'exclusive', 'limited time', 'deal',
+        'sale', 'discount', 'offer', 'free shipping', 'cod available',
+        'cash on delivery', 'lowest price', 'great indian', 'festival',
+        'for parties', 'cool', 'attractive', 'beautiful', 'amazing',
+        'super', 'premium', 'high quality', 'branded', 'original'
+    ]
+    
+    CLOTHING_KEYWORDS = [
+        'kurta', 'shirt', 'dress', 'top', 'bottom', 'jeans', 'trouser',
+        'saree', 'lehenga', 'suit', 'kurti', 'palazzo', 'dupatta',
+        'blouse', 'skirt', 'shorts', 'tshirt', 't-shirt', 'hoodie',
+        'jacket', 'coat', 'sweater', 'cardigan', 'blazer'
+    ]
+    
+    GENDER_KEYWORDS = {
+        'women': ['women', 'womens', 'ladies', 'girls', 'female', 'girl'],
+        'men': ['men', 'mens', 'boys', 'male', 'boy', 'gents'],
+        'kids': ['kids', 'child', 'children', 'baby', 'infant'],
+        'unisex': ['unisex', 'couple']
+    }
+    
+    QUANTITY_PATTERNS = [
+        r'pack of (\d+)', r'set of (\d+)', r'(\d+)\s*pcs?', r'(\d+)\s*pieces?',
+        r'(\d+)\s*units?', r'(\d+)\s*kg', r'(\d+)\s*g\b', r'(\d+)\s*ml',
+        r'(\d+)\s*l\b', r'combo of (\d+)', r'(\d+)\s*pairs?',
+        r'multipack\s*(\d+)', r'(\d+)\s*in\s*1'
+    ]
+    
+    @staticmethod
+    async def extract_title_from_url(url: str) -> Optional[str]:
+        """Extract title from product page with improved headers"""
+        try:
+            # Rotate user agents and add more headers to avoid blocking
+            user_agents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0'
+            ]
             
-    except Exception as e:
-        logger.error(f"Error processing message: {e}")
-        await update.effective_message.reply_text("❌ Error processing your message")
-
-async def process_single_url(url: str, message, context) -> bool:
-    """Process a single product URL and return success status"""
-    try:
-        # Resolve and clean URL
-        resolver = URLResolver()
-        original_url = url
-        
-        # Unshorten if needed
-        if any(shortener in url for shortener in SHORTENERS):
-            url = await resolver.unshorten_url(url)
-        
-        # Check if supported domain
-        if not resolver.is_supported_domain(url):
-            logger.warning(f"Unsupported domain: {url}")
-            return False
-        
-        # Clean URL (remove tracking parameters)
-        clean_url = resolver.clean_url(url)
-        
-        # Fetch product page
-        response = await asyncio.to_thread(
-            requests.get, clean_url, 
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            import random
+            headers = {
+                'User-Agent': random.choice(user_agents),
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
+                'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
-            },
-            timeout=3
-        )
-        response.raise_for_status()
-        
-        # Extract product information
-        html_content = response.text
-        message_text = message.text or message.caption or ""
-        
-        title = TitleCleaner.extract_title(html_content, clean_url, message_text)
-        price = PriceExtractor.extract_price(html_content, message_text) or "rs"
-        
-        # Build response
-        if "meesho.com" in clean_url:
-            size = MeeshoHandler.extract_size(html_content, message_text)
-            pin = MeeshoHandler.extract_pin(message_text)
-            response_text = f"{title} @{price}\n{clean_url}\n{size}\n{pin}\n\n@reviewcheckk"
-        else:
-            response_text = f"{title} @{price}\n{clean_url}\n\n@reviewcheckk"
-        
-        # Send response
-        if message.photo:
-            # Reuse the original photo with new caption
-            await message.reply_photo(
-                photo=message.photo[-1].file_id,
-                caption=response_text
-            )
-        else:
-            await message.reply_text(response_text)
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Cache-Control': 'max-age=0'
+            }
             
-        return True
+            def scrape_title():
+                session = requests.Session()
+                session.headers.update(headers)
+                
+                # Add delay to avoid rate limiting
+                import time
+                time.sleep(0.5)
+                
+                response = session.get(url, timeout=5, allow_redirects=True)
+                response.raise_for_status()
+                
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Try multiple title extraction methods
+                title_candidates = []
+                
+                # Method 1: og:title
+                og_title = soup.find('meta', property='og:title')
+                if og_title and og_title.get('content'):
+                    title_candidates.append(og_title['content'].strip())
+                
+                # Method 2: twitter:title
+                twitter_title = soup.find('meta', attrs={'name': 'twitter:title'})
+                if twitter_title and twitter_title.get('content'):
+                    title_candidates.append(twitter_title['content'].strip())
+                
+                # Method 3: page title
+                title_tag = soup.find('title')
+                if title_tag and title_tag.text:
+                    title_candidates.append(title_tag.text.strip())
+                
+                # Method 4: h1 tag
+                h1_tag = soup.find('h1')
+                if h1_tag and h1_tag.text:
+                    title_candidates.append(h1_tag.text.strip())
+                
+                # Method 5: Product-specific selectors
+                domain = urlparse(url).netloc.lower()
+                
+                if 'meesho.com' in domain:
+                    product_title = soup.find('span', class_='Text__StyledText-sc-oo0kvp-0')
+                    if product_title and product_title.text:
+                        title_candidates.append(product_title.text.strip())
+                
+                elif 'flipkart.com' in domain:
+                    product_title = soup.find('span', class_='B_NuCI')
+                    if not product_title:
+                        product_title = soup.find('h1', class_='x2cTzZ')
+                    if product_title and product_title.text:
+                        title_candidates.append(product_title.text.strip())
+                
+                elif 'amazon.in' in domain:
+                    product_title = soup.find('span', id='productTitle')
+                    if product_title and product_title.text:
+                        title_candidates.append(product_title.text.strip())
+                
+                # Return the best candidate (shortest non-empty title usually best)
+                valid_titles = [t for t in title_candidates if t and len(t) > 5]
+                if valid_titles:
+                    return min(valid_titles, key=len)  # Return shortest valid title
+                
+                return title_candidates[0] if title_candidates else None
             
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error processing URL {url}: {e}")
-        await message.reply_text("❌ Unable to fetch product information")
-    except Exception as e:
-        logger.error(f"Error processing URL {url}: {e}")
-        await message.reply_text("❌ Unable to extract product info")
+            return await asyncio.to_thread(scrape_title)
+            
+        except Exception as e:
+            logger.warning(f"Failed to extract title from {url}: {e}")
+            return None
     
-    return False
+    @staticmethod
+    def clean_title(raw_title: str) -> str:
+        """Clean and format product title according to new rules"""
+        if not raw_title:
+            return ""
+        
+        # Remove emojis and special characters except basic punctuation
+        title = re.sub(r'[^\w\s\-&().]', ' ', raw_title)
+        
+        # Remove fluff words
+        for fluff in TitleCleaner.FLUFF_WORDS:
+            title = re.sub(re.escape(fluff), '', title, flags=re.IGNORECASE)
+        
+        # Normalize whitespace
+        title = ' '.join(title.split())
+        
+        # Reject nonsense titles
+        if TitleCleaner.is_nonsense_title(title):
+            return ""
+        
+        # Extract components using new rules
+        return TitleCleaner.format_with_new_rules(title)
+    
+    @staticmethod
+    def format_with_new_rules(title: str) -> str:
+        """Format title according to: [Gender] [Quantity] [Brand] [Product]"""
+        words = title.lower().split()
+        
+        # Extract components
+        gender = TitleCleaner.extract_gender(words)
+        quantity = TitleCleaner.extract_quantity(' '.join(words))
+        brand = TitleCleaner.extract_brand(words)
+        product = TitleCleaner.extract_product(words)
+        
+        # Build final title
+        parts = []
+        if gender:
+            parts.append(gender)
+        if quantity:
+            parts.append(quantity)
+        if brand:
+            parts.append(brand)
+        if product:
+            parts.extend(product.split()[:3])  # Max 3 words for product
+        
+        # Ensure max 8 words total
+        final_parts = parts[:8]
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_parts = []
+        for part in final_parts:
+            part_lower = part.lower()
+            if part_lower not in seen:
+                seen.add(part_lower)
+                unique_parts.append(part.title())
+        
+        return ' '.join(unique_parts)
+    
+    @staticmethod
+    def extract_gender(words: List[str]) -> Optional[str]:
+        """Extract gender from words"""
+        for gender, keywords in TitleCleaner.GENDER_KEYWORDS.items():
+            if any(keyword in words for keyword in keywords):
+                return gender.title()
+        return None
+    
+    @staticmethod
+    def extract_quantity(text: str) -> Optional[str]:
+        """Extract quantity information"""
+        for pattern in TitleCleaner.QUANTITY_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                quantity = match.group(1) if match.groups() else match.group(0)
+                
+                # Format based on pattern type
+                if 'pack of' in pattern:
+                    return f"Pack of {quantity}"
+                elif 'set of' in pattern:
+                    return f"Set of {quantity}"
+                elif 'pcs' in pattern or 'pieces' in pattern:
+                    return f"{quantity} Pcs"
+                elif 'kg' in pattern:
+                    return f"{quantity}kg"
+                elif 'g' in pattern and 'kg' not in pattern:
+                    return f"{quantity}g"
+                elif 'ml' in pattern:
+                    return f"{quantity}ml"
+                elif 'l' in pattern and 'ml' not in pattern:
+                    return f"{quantity}L"
+                elif 'combo' in pattern:
+                    return f"Combo of {quantity}"
+                elif 'pairs' in pattern:
+                    return f"{quantity} Pairs"
+                elif 'multipack' in pattern:
+                    return f"Multipack {quantity}"
+                else:
+                    return f"{quantity} Pcs"
+        
+        return None
+    
+    @staticmethod
+    def extract_brand(words: List[str]) -> Optional[str]:
+        """Extract brand name (usually first meaningful word)"""
+        # Common brands to prioritize
+        known_brands = [
+            'nike', 'adidas', 'puma', 'reebok', 'boat', 'jbl', 'sony', 
+            'samsung', 'apple', 'mi', 'realme', 'oneplus', 'vivo', 'oppo',
+            'libas', 'aurelia', 'w', 'biba', 'global desi', 'chemistry'
+        ]
+        
+        # Look for known brands first
+        for word in words:
+            if word in known_brands:
+                return word.title()
+        
+        # If no known brand, take first meaningful word (not gender/quantity)
+        for word in words:
+            if (word not in [kw for kw_list in TitleCleaner.GENDER_KEYWORDS.values() for kw in kw_list] 
+                and not re.match(r'\d+', word) 
+                and len(word) > 2):
+                return word.title()
+        
+        return None
+    
+    @staticmethod
+    def extract_product(words: List[str]) -> str:
+        """Extract product name (clothing items or main product)"""
+        # Find clothing keywords
+        for word in words:
+            if word in TitleCleaner.CLOTHING_KEYWORDS:
+                return word.title()
+        
+        # If not clothing, extract meaningful product words
+        product_words = []
+        skip_words = ['for', 'with', 'and', 'or', 'the', 'a', 'an', 'in', 'on', 'at']
+        
+        for word in words:
+            if (len(word) > 2 
+                and word not in skip_words
+                and word not in [kw for kw_list in TitleCleaner.GENDER_KEYWORDS.values() for kw in kw_list]
+                and not re.match(r'\d+', word)):
+                product_words.append(word)
+        
+        # Take last 2-3 meaningful words as product name
+        return ' '.join(product_words[-3:]) if product_words else 'Product'
+    
+    @staticmethod
+    def is_nonsense_title(title: str) -> bool:
+        """Check if title is nonsense/invalid"""
+        if len(title) < 3:
+            return True
+        
+        # Check for lack of vowels
+        vowel_count = len([c for c in title.lower() if c in 'aeiou'])
+        if vowel_count < len(title) * 0.1:  # Less than 10% vowels
+            return True
+        
+        # Check for repeated characters
+        if re.search(r'(.)\1{4,}', title):  # Same char repeated 5+ times
+            return True
+        
+        return False
+    
+    @staticmethod
+    def is_clothing_item(title: str) -> bool:
+        """Check if product is clothing item"""
+        return any(keyword in title.lower() for keyword in TitleCleaner.CLOTHING_KEYWORDS)
+
+class PriceExtractor:
+    """Extract and format prices"""
+    
+    @staticmethod
+    def extract_price(text: str) -> Optional[str]:
+        """Extract price from text"""
+        # Look for price patterns
+        price_patterns = [
+            r'(?:₹|Rs?\.?\s*)(\d[\d,]*)',  # ₹1299 or Rs. 1299
+            r'(\d[\d,]*)\s*(?:₹|Rs?\.?)',  # 1299₹ or 1299 Rs
+            r'price\s*:?\s*(?:₹|Rs?\.?\s*)(\d[\d,]*)',  # price: ₹1299
+            r'cost\s*:?\s*(?:₹|Rs?\.?\s*)(\d[\d,]*)',   # cost: ₹1299
+            r'@\s*(\d[\d,]*)\s*rs',  # @1299 rs
+        ]
+        
+        for pattern in price_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                price = matches[0].replace(',', '')
+                if price.isdigit() and int(price) > 0:
+                    return price
+        
+        return None
+    
+    @staticmethod
+    def format_price(price: str) -> str:
+        """Format price in ReviewCheckk style"""
+        if not price:
+            return "@rs"
+        return f"@{price} rs"
+
+class PinDetector:
+    """Detect PIN codes from messages"""
+    
+    @staticmethod
+    def extract_pin(text: str) -> str:
+        """Extract 6-digit PIN code from text"""
+        pin_pattern = r'\b(\d{6})\b'
+        matches = re.findall(pin_pattern, text)
+        
+        for pin in matches:
+            # Validate PIN (should not be all same digits or sequential)
+            if len(set(pin)) > 1 and not re.match(r'123456|654321', pin):
+                return pin
+        
+        return "110001"  # Default PIN for Delhi
+
+class ResponseBuilder:
+    """Build formatted responses"""
+    
+    @staticmethod
+    def build_response(title: str, url: str, price: str, is_meesho: bool = False, 
+                      size: str = "All", pin: str = "110001") -> str:
+        """Build final formatted response"""
+        
+        if not title:
+            return "❌ Unable to extract product info"
+        
+        # Format price
+        formatted_price = PriceExtractor.format_price(price)
+        
+        # Build base response
+        response = f"{title} {formatted_price}\n{url}"
+        
+        # Add Meesho-specific info
+        if is_meesho:
+            response += f"\nSize - {size}\nPin - {pin}"
+        
+        return response
+
+class ReviewCheckkBot:
+    """Main bot class"""
+    
+    def __init__(self, token: str):
+        self.application = Application.builder().token(token).build()
+        self.setup_handlers()
+    
+    def setup_handlers(self):
+        """Setup message handlers"""
+        # Handle all messages with links or images
+        self.application.add_handler(
+            MessageHandler(
+                filters.TEXT | filters.PHOTO | filters.FORWARDED,
+                self.handle_message
+            )
+        )
+    
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Main message handler"""
+        try:
+            message = update.message
+            
+            # Get text from message or caption
+            text = self.extract_text(message)
+            
+            if not text:
+                if message.photo:
+                    await message.reply_text("No title provided")
+                return
+            
+            # Extract and process URLs
+            urls = URLResolver.detect_links(text)
+            
+            if not urls:
+                return  # No URLs to process
+            
+            # Process each URL
+            for url in urls:
+                response = await self.process_url(url, text)
+                if response:
+                    await message.reply_text(response, parse_mode=None)
+            
+        except Exception as e:
+            logger.error(f"Error handling message: {e}")
+            await update.message.reply_text("❌ Unable to extract product info")
+    
+    def extract_text(self, message: Message) -> str:
+        """Extract text from message or caption"""
+        if message.text:
+            return message.text
+        elif message.caption:
+            return message.caption
+        elif message.forward_from and hasattr(message.forward_from, 'text'):
+            return message.forward_from.text
+        return ""
+    
+    async def process_url(self, url: str, message_text: str) -> Optional[str]:
+        """Process a single URL and return formatted response"""
+        try:
+            # Unshorten URL if needed
+            if URLResolver.is_shortener(url):
+                final_url = await URLResolver.unshorten_url(url)
+            else:
+                final_url = URLResolver.clean_url(url)
+            
+            # First priority: Check if message has forwarded title info
+            forwarded_title = self.extract_forwarded_title(message_text)
+            
+            # Extract title with priority: forwarded > scraped > message
+            if forwarded_title:
+                clean_title = TitleCleaner.clean_title(forwarded_title)
+            else:
+                # Try to scrape from URL
+                scraped_title = await TitleCleaner.extract_title_from_url(final_url)
+                if scraped_title:
+                    clean_title = TitleCleaner.clean_title(scraped_title)
+                else:
+                    # Fallback to message text
+                    clean_title = TitleCleaner.clean_title(message_text)
+            
+            # Extract price (prioritize message text)
+            price = PriceExtractor.extract_price(message_text)
+            
+            # Check if it's Meesho
+            is_meesho = 'meesho.com' in final_url.lower()
+            
+            # For Meesho, extract size and pin
+            size = "All"
+            pin = "110001"
+            
+            if is_meesho:
+                # Extract size from message
+                size_match = re.search(r'size\s*[-:]?\s*([^\n,]+)', message_text, re.IGNORECASE)
+                if size_match:
+                    size = size_match.group(1).strip()
+                
+                # Extract PIN
+                pin = PinDetector.extract_pin(message_text)
+            
+            # Build and return response
+            return ResponseBuilder.build_response(
+                clean_title, final_url, price, is_meesho, size, pin
+            )
+            
+        except Exception as e:
+            logger.error(f"Error processing URL {url}: {e}")
+            return "❌ Unable to extract product info"
+    
+    def extract_forwarded_title(self, text: str) -> Optional[str]:
+        """Extract title from forwarded message text patterns"""
+        # Look for patterns like "Product Name @price rs"
+        title_price_pattern = r'^([^@]+?)\s*@\d+\s*rs'
+        match = re.search(title_price_pattern, text.strip(), re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        
+        # Look for title on separate line before URL
+        lines = text.strip().split('\n')
+        for i, line in enumerate(lines):
+            if 'http' in line and i > 0:  # URL found, check previous line
+                potential_title = lines[i-1].strip()
+                if potential_title and not re.search(r'@\d+\s*rs', potential_title):
+                    return potential_title
+        
+        return None
+    
+    def run(self):
+        """Start the bot"""
+        logger.info("Starting ReviewCheckk Style Bot...")
+        self.application.run_polling()
 
 def main():
-    """Start the bot"""
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN environment variable is required")
+    """Main function"""
+    # Bot token
+    TOKEN = "8214627280:AAGveHdnt41wfXIaNunu6RBPsHDqMfIZo5E"
     
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add message handler
-    application.add_handler(MessageHandler(
-        filters.TEXT | filters.PHOTO | filters.CAPTION | filters.FORWARDED, 
-        handle_message
-    ))
-    
-    # Start polling
-    logger.info("Bot started")
-    application.run_polling()
+    # Create and run bot
+    bot = ReviewCheckkBot(TOKEN)
+    bot.run()
 
 if __name__ == "__main__":
     main()
