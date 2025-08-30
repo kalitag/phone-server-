@@ -1,13 +1,16 @@
 import asyncio
 import re
 import logging
-from urllib.parse import urlparse, parse_qs, urlunparse
+from urllib.parse import urlparse, parse_qs, urlunparse, unquote
 from typing import Optional, List, Dict, Tuple
 import requests
 from bs4 import BeautifulSoup
 from telegram import Update, Message
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatType
+import time
+import random
+from fake_useragent import UserAgent
 
 # Configure logging
 logging.basicConfig(
@@ -22,7 +25,8 @@ class URLResolver:
     SHORTENERS = [
         'amzn.to', 'fkrt.cc', 'spoo.me', 'wishlink.com', 'bitli.in', 
         'da.gd', 'cutt.ly', 'bit.ly', 'tinyurl.com', 'goo.gl', 't.co',
-        'short.me', 'u.to', 'ow.ly', 'tiny.cc', 'is.gd'
+        'short.me', 'u.to', 'ow.ly', 'tiny.cc', 'is.gd', 'extp.in',
+        'faym.co', 'myntr.in', 'dl.flipkart.com'
     ]
     
     TRACKING_PARAMS = [
@@ -35,7 +39,7 @@ class URLResolver:
     @staticmethod
     def detect_links(text: str) -> List[str]:
         """Extract all URLs from text"""
-        url_pattern = r'https?://(?:[-\w.])+(?::[0-9]+)?(?:/(?:[\w/_.])*)?(?:\?(?:[\w&=%.])*)?(?:#(?:[\w.])*)?'
+        url_pattern = r'https?://(?:[-\w.])+(?::[0-9]+)?(?:/(?:[\w/_.\-~%])*)?(?:\?(?:[\w&=%.\-])*)?(?:#(?:[\w.\-])*)?'
         return re.findall(url_pattern, text)
     
     @staticmethod
@@ -45,15 +49,23 @@ class URLResolver:
         return any(shortener in domain for shortener in URLResolver.SHORTENERS)
     
     @staticmethod
-    async def unshorten_url(url: str) -> str:
-        """Resolve shortened URL to final destination"""
+    async def unshorten_url(url: str, max_redirects: int = 5) -> str:
+        """Resolve shortened URL to final destination with multiple redirect handling"""
         try:
+            ua = UserAgent()
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': ua.random,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
             }
             
             def make_request():
-                response = requests.get(url, headers=headers, allow_redirects=True, timeout=2.5)
+                session = requests.Session()
+                session.max_redirects = max_redirects
+                response = session.get(url, headers=headers, allow_redirects=True, timeout=8, verify=False)
                 return response.url
             
             final_url = await asyncio.to_thread(make_request)
@@ -89,7 +101,7 @@ class URLResolver:
             return url
 
 class TitleCleaner:
-    """Extract and clean product titles"""
+    """Extract and clean product titles with advanced fallback strategies"""
     
     FLUFF_WORDS = [
         'best offer', 'trending', 'stylish', 'buy online', 'india', 'amazon.in',
@@ -97,14 +109,16 @@ class TitleCleaner:
         'sale', 'discount', 'offer', 'free shipping', 'cod available',
         'cash on delivery', 'lowest price', 'great indian', 'festival',
         'for parties', 'cool', 'attractive', 'beautiful', 'amazing',
-        'super', 'premium', 'high quality', 'branded', 'original'
+        'super', 'premium', 'high quality', 'branded', 'original',
+        'https', 'http', 'www', 'com', 'in'
     ]
     
     CLOTHING_KEYWORDS = [
         'kurta', 'shirt', 'dress', 'top', 'bottom', 'jeans', 'trouser',
         'saree', 'lehenga', 'suit', 'kurti', 'palazzo', 'dupatta',
         'blouse', 'skirt', 'shorts', 'tshirt', 't-shirt', 'hoodie',
-        'jacket', 'coat', 'sweater', 'cardigan', 'blazer'
+        'jacket', 'coat', 'sweater', 'cardigan', 'blazer', 'nighty',
+        'tote', 'bag', 'sunscreen', 'lotion', 'cream', 'gel', 'shower'
     ]
     
     GENDER_KEYWORDS = {
@@ -122,97 +136,246 @@ class TitleCleaner:
     ]
     
     @staticmethod
-    async def extract_title_from_url(url: str) -> Optional[str]:
-        """Extract title from product page with improved headers"""
+    async def extract_title_with_fallback(url: str, message_text: str) -> str:
+        """Extract title using multiple fallback strategies"""
+        
+        # Strategy 1: Check for forwarded message patterns
+        forwarded_title = TitleCleaner.extract_forwarded_title(message_text)
+        if forwarded_title:
+            return TitleCleaner.clean_title(forwarded_title)
+        
+        # Strategy 2: Web scraping with enhanced methods
+        scraped_title = await TitleCleaner.extract_title_from_url_enhanced(url)
+        if scraped_title and not TitleCleaner.is_nonsense_title(scraped_title):
+            return TitleCleaner.clean_title(scraped_title)
+        
+        # Strategy 3: Extract from URL slug
+        slug_title = TitleCleaner.extract_title_from_url_slug(url)
+        if slug_title:
+            return TitleCleaner.clean_title(slug_title)
+        
+        # Strategy 4: Clean message text
+        message_title = TitleCleaner.extract_title_from_message(message_text)
+        if message_title:
+            return TitleCleaner.clean_title(message_title)
+        
+        return ""
+    
+    @staticmethod
+    def extract_forwarded_title(text: str) -> Optional[str]:
+        """Extract title from forwarded message patterns"""
+        # Pattern 1: "Product Name @price rs"
+        title_price_pattern = r'^([^@\n]+?)\s*@\d+\s*rs'
+        match = re.search(title_price_pattern, text.strip(), re.IGNORECASE | re.MULTILINE)
+        if match:
+            return match.group(1).strip()
+        
+        # Pattern 2: Title on line before URL
+        lines = text.strip().split('\n')
+        for i, line in enumerate(lines):
+            if 'http' in line.lower() and i > 0:
+                potential_title = lines[i-1].strip()
+                if potential_title and not re.search(r'@\d+\s*rs', potential_title):
+                    # Filter out noise
+                    if not any(noise in potential_title.lower() for noise in ['forwarded from', 'http', 'www']):
+                        return potential_title
+        
+        return None
+    
+    @staticmethod
+    def extract_title_from_url_slug(url: str) -> Optional[str]:
+        """Extract product name from URL path/slug"""
         try:
-            # Rotate user agents and add more headers to avoid blocking
-            user_agents = [
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0'
+            parsed = urlparse(url)
+            path = unquote(parsed.path)
+            
+            # Common product URL patterns
+            patterns = [
+                r'/product/([^/]+)',
+                r'/p/([^/]+)',
+                r'/dp/([^/]+)',
+                r'/([^/]+)/p/',
+                r'/share/([^/]+)',
+                r'/s/p/([^/]+)',
+                r'/([^/]+)$'  # Last segment
             ]
             
-            import random
+            for pattern in patterns:
+                match = re.search(pattern, path)
+                if match:
+                    slug = match.group(1)
+                    # Convert slug to readable title
+                    title = slug.replace('-', ' ').replace('_', ' ')
+                    # Remove product IDs (long alphanumeric strings)
+                    title = re.sub(r'\b[a-zA-Z0-9]{8,}\b', '', title)
+                    title = ' '.join(title.split())
+                    
+                    if title and len(title) > 3:
+                        return title
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    @staticmethod
+    def extract_title_from_message(text: str) -> Optional[str]:
+        """Extract title from message text as last resort"""
+        # Remove URLs
+        text_no_urls = re.sub(r'https?://[^\s]+', '', text)
+        
+        # Remove common noise
+        for noise in ['forwarded from', '@', 'rs', 'pin', 'size']:
+            text_no_urls = re.sub(noise, '', text_no_urls, flags=re.IGNORECASE)
+        
+        # Clean and validate
+        words = text_no_urls.split()
+        meaningful_words = [w for w in words if len(w) > 2 and w.lower() not in TitleCleaner.FLUFF_WORDS]
+        
+        if meaningful_words:
+            return ' '.join(meaningful_words[:5])  # Max 5 words
+        
+        return None
+    
+    @staticmethod
+    async def extract_title_from_url_enhanced(url: str) -> Optional[str]:
+        """Enhanced title extraction with multiple user agents and methods"""
+        try:
+            # Use fake_useragent for better rotation
+            ua = UserAgent()
+            
+            # Domain-specific handling
+            domain = urlparse(url).netloc.lower()
+            
+            # Mobile user agent for mobile-optimized sites
+            if any(site in domain for site in ['meesho', 'myntra', 'ajio']):
+                user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'
+            else:
+                user_agent = ua.random
+            
             headers = {
-                'User-Agent': random.choice(user_agents),
+                'User-Agent': user_agent,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate',
                 'DNT': '1',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
                 'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': 'none',
-                'Cache-Control': 'max-age=0'
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
             }
+            
+            # Add referer for some sites
+            if 'wishlink' in domain or 'extp' in domain or 'faym' in domain:
+                headers['Referer'] = 'https://www.google.com/'
             
             def scrape_title():
                 session = requests.Session()
                 session.headers.update(headers)
                 
-                # Add delay to avoid rate limiting
-                import time
-                time.sleep(0.5)
+                # Add small random delay
+                time.sleep(random.uniform(0.5, 1.5))
                 
-                response = session.get(url, timeout=5, allow_redirects=True)
-                response.raise_for_status()
+                # Disable SSL verification for problematic sites
+                response = session.get(url, timeout=8, allow_redirects=True, verify=False)
+                
+                # Check status code
+                if response.status_code != 200:
+                    logger.warning(f"Got status {response.status_code} for {url}")
                 
                 soup = BeautifulSoup(response.content, 'html.parser')
                 
-                # Try multiple title extraction methods
+                # Enhanced title extraction with domain-specific selectors
                 title_candidates = []
                 
-                # Method 1: og:title
-                og_title = soup.find('meta', property='og:title')
-                if og_title and og_title.get('content'):
-                    title_candidates.append(og_title['content'].strip())
+                # Universal meta tags
+                for meta_prop in ['og:title', 'twitter:title', 'title']:
+                    meta_tag = soup.find('meta', attrs={'property': meta_prop}) or \
+                               soup.find('meta', attrs={'name': meta_prop})
+                    if meta_tag and meta_tag.get('content'):
+                        title_candidates.append(meta_tag['content'].strip())
                 
-                # Method 2: twitter:title
-                twitter_title = soup.find('meta', attrs={'name': 'twitter:title'})
-                if twitter_title and twitter_title.get('content'):
-                    title_candidates.append(twitter_title['content'].strip())
-                
-                # Method 3: page title
+                # Page title
                 title_tag = soup.find('title')
                 if title_tag and title_tag.text:
                     title_candidates.append(title_tag.text.strip())
                 
-                # Method 4: h1 tag
-                h1_tag = soup.find('h1')
-                if h1_tag and h1_tag.text:
-                    title_candidates.append(h1_tag.text.strip())
-                
-                # Method 5: Product-specific selectors
-                domain = urlparse(url).netloc.lower()
-                
+                # Domain-specific selectors
                 if 'meesho.com' in domain:
-                    product_title = soup.find('span', class_='Text__StyledText-sc-oo0kvp-0')
-                    if product_title and product_title.text:
-                        title_candidates.append(product_title.text.strip())
+                    selectors = [
+                        'span.Text__StyledText-sc-oo0kvp-0',
+                        'h1.Typography__H1-sc-10o6omr-0',
+                        'div[class*="ProductTitle"]',
+                        'span[class*="product-title"]',
+                        'h1'
+                    ]
+                elif 'flipkart.com' in domain or 'fkrt' in domain:
+                    selectors = [
+                        'span.B_NuCI',
+                        'h1.yhB1nd',
+                        'div._2XKOHV',
+                        'h1[class*="title"]',
+                        'span[class*="title"]'
+                    ]
+                elif 'amazon' in domain or 'amzn.to' in domain:
+                    selectors = [
+                        'span#productTitle',
+                        'h1#title',
+                        'h1.a-size-large',
+                        'span[id*="title"]'
+                    ]
+                elif 'myntra' in domain or 'myntr.in' in domain:
+                    selectors = [
+                        'h1.pdp-title',
+                        'h1.pdp-name',
+                        'div.pdp-price-info',
+                        'h1[class*="product"]'
+                    ]
+                elif 'wishlink' in domain or 'extp' in domain or 'faym' in domain:
+                    # Affiliate sites - try multiple approaches
+                    selectors = [
+                        'h1', 'h2', 'h3',
+                        '.product-title', '.title', '#title',
+                        '.product-name', '.item-title',
+                        'div[class*="title"]', 'span[class*="title"]',
+                        'meta[property="og:title"]'
+                    ]
+                else:
+                    selectors = ['h1', 'h2', '.product-title', '.title']
                 
-                elif 'flipkart.com' in domain:
-                    product_title = soup.find('span', class_='B_NuCI')
-                    if not product_title:
-                        product_title = soup.find('h1', class_='x2cTzZ')
-                    if product_title and product_title.text:
-                        title_candidates.append(product_title.text.strip())
+                # Try each selector
+                for selector in selectors:
+                    try:
+                        element = soup.select_one(selector)
+                        if element:
+                            text = element.get_text(strip=True) if hasattr(element, 'get_text') else str(element)
+                            if text and len(text) > 5:
+                                title_candidates.append(text)
+                    except:
+                        continue
                 
-                elif 'amazon.in' in domain:
-                    product_title = soup.find('span', id='productTitle')
-                    if product_title and product_title.text:
-                        title_candidates.append(product_title.text.strip())
+                # Clean and return best candidate
+                valid_titles = []
+                for title in title_candidates:
+                    if title and not TitleCleaner.is_nonsense_title(title):
+                        # Remove common suffixes
+                        title = re.sub(r'\s*[-|].*(?:Flipkart|Amazon|Meesho|Myntra).*$', '', title)
+                        valid_titles.append(title.strip())
                 
-                # Return the best candidate (shortest non-empty title usually best)
-                valid_titles = [t for t in title_candidates if t and len(t) > 5]
                 if valid_titles:
-                    return min(valid_titles, key=len)  # Return shortest valid title
+                    # Return shortest meaningful title
+                    return min(valid_titles, key=lambda x: len(x) if len(x) > 10 else 1000)
                 
-                return title_candidates[0] if title_candidates else None
+                return None
             
             return await asyncio.to_thread(scrape_title)
             
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Request failed for {url}: {e}")
+            return None
         except Exception as e:
             logger.warning(f"Failed to extract title from {url}: {e}")
             return None
@@ -223,12 +386,16 @@ class TitleCleaner:
         if not raw_title:
             return ""
         
-        # Remove emojis and special characters except basic punctuation
-        title = re.sub(r'[^\w\s\-&().]', ' ', raw_title)
+        # Remove URLs and domain names
+        title = re.sub(r'https?://[^\s]+', '', raw_title)
+        title = re.sub(r'www\.[^\s]+', '', title)
+        
+        # Remove special characters but keep basic punctuation
+        title = re.sub(r'[^\w\s\-&().,]', ' ', title)
         
         # Remove fluff words
         for fluff in TitleCleaner.FLUFF_WORDS:
-            title = re.sub(re.escape(fluff), '', title, flags=re.IGNORECASE)
+            title = re.sub(r'\b' + re.escape(fluff) + r'\b', '', title, flags=re.IGNORECASE)
         
         # Normalize whitespace
         title = ' '.join(title.split())
@@ -273,6 +440,10 @@ class TitleCleaner:
             if part_lower not in seen:
                 seen.add(part_lower)
                 unique_parts.append(part.title())
+        
+        # If we have nothing, return a generic product name
+        if not unique_parts:
+            return "Product"
         
         return ' '.join(unique_parts)
     
@@ -321,11 +492,12 @@ class TitleCleaner:
     @staticmethod
     def extract_brand(words: List[str]) -> Optional[str]:
         """Extract brand name (usually first meaningful word)"""
-        # Common brands to prioritize
+        # Extended brand list
         known_brands = [
             'nike', 'adidas', 'puma', 'reebok', 'boat', 'jbl', 'sony', 
             'samsung', 'apple', 'mi', 'realme', 'oneplus', 'vivo', 'oppo',
-            'libas', 'aurelia', 'w', 'biba', 'global desi', 'chemistry'
+            'libas', 'aurelia', 'w', 'biba', 'global desi', 'chemistry',
+            'aqualogica', 'dove', 'lakme', 'maybelline', 'loreal', 'nivea'
         ]
         
         # Look for known brands first
@@ -345,12 +517,18 @@ class TitleCleaner:
     @staticmethod
     def extract_product(words: List[str]) -> str:
         """Extract product name (clothing items or main product)"""
-        # Find clothing keywords
+        # Extended product keywords
+        product_keywords = TitleCleaner.CLOTHING_KEYWORDS + [
+            'watch', 'phone', 'earphones', 'headphones', 'speaker',
+            'charger', 'cable', 'powerbank', 'case', 'cover'
+        ]
+        
+        # Find product keywords
         for word in words:
-            if word in TitleCleaner.CLOTHING_KEYWORDS:
+            if word in product_keywords:
                 return word.title()
         
-        # If not clothing, extract meaningful product words
+        # If not found, extract meaningful product words
         product_words = []
         skip_words = ['for', 'with', 'and', 'or', 'the', 'a', 'an', 'in', 'on', 'at']
         
@@ -367,16 +545,25 @@ class TitleCleaner:
     @staticmethod
     def is_nonsense_title(title: str) -> bool:
         """Check if title is nonsense/invalid"""
-        if len(title) < 3:
+        if not title or len(title) < 3:
             return True
         
         # Check for lack of vowels
         vowel_count = len([c for c in title.lower() if c in 'aeiou'])
-        if vowel_count < len(title) * 0.1:  # Less than 10% vowels
+        if vowel_count < len(title) * 0.15:  # Less than 15% vowels
             return True
         
         # Check for repeated characters
         if re.search(r'(.)\1{4,}', title):  # Same char repeated 5+ times
+            return True
+        
+        # Check if it's just a URL or domain
+        if re.match(r'^(https?://|www\.)', title.lower()):
+            return True
+        
+        # Check if it contains only noise words
+        noise_only = all(word.lower() in TitleCleaner.FLUFF_WORDS for word in title.split())
+        if noise_only:
             return True
         
         return False
@@ -394,11 +581,11 @@ class PriceExtractor:
         """Extract price from text"""
         # Look for price patterns
         price_patterns = [
+            r'@\s*(\d[\d,]*)\s*rs',  # @1299 rs (priority)
             r'(?:₹|Rs?\.?\s*)(\d[\d,]*)',  # ₹1299 or Rs. 1299
             r'(\d[\d,]*)\s*(?:₹|Rs?\.?)',  # 1299₹ or 1299 Rs
             r'price\s*:?\s*(?:₹|Rs?\.?\s*)(\d[\d,]*)',  # price: ₹1299
             r'cost\s*:?\s*(?:₹|Rs?\.?\s*)(\d[\d,]*)',   # cost: ₹1299
-            r'@\s*(\d[\d,]*)\s*rs',  # @1299 rs
         ]
         
         for pattern in price_patterns:
@@ -423,13 +610,18 @@ class PinDetector:
     @staticmethod
     def extract_pin(text: str) -> str:
         """Extract 6-digit PIN code from text"""
-        pin_pattern = r'\b(\d{6})\b'
-        matches = re.findall(pin_pattern, text)
+        # Look for PIN patterns
+        pin_patterns = [
+            r'pin\s*[-:]?\s*(\d{6})',  # Pin: 110001
+            r'\b(\d{6})\b'  # Just 6 digits
+        ]
         
-        for pin in matches:
-            # Validate PIN (should not be all same digits or sequential)
-            if len(set(pin)) > 1 and not re.match(r'123456|654321', pin):
-                return pin
+        for pattern in pin_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for pin in matches:
+                # Validate PIN (should not be all same digits or sequential)
+                if len(set(pin)) > 1 and not re.match(r'123456|654321|111111|000000', pin):
+                    return pin
         
         return "110001"  # Default PIN for Delhi
 
@@ -442,7 +634,8 @@ class ResponseBuilder:
         """Build final formatted response"""
         
         if not title:
-            return "❌ Unable to extract product info"
+            # Never return "Unable to extract" - always provide something
+            title = "Product"
         
         # Format price
         formatted_price = PriceExtractor.format_price(price)
@@ -457,33 +650,46 @@ class ResponseBuilder:
         return response
 
 class ReviewCheckkBot:
-    """Main bot class"""
+    """Main bot class with channel support"""
     
     def __init__(self, token: str):
         self.application = Application.builder().token(token).build()
         self.setup_handlers()
     
     def setup_handlers(self):
-        """Setup message handlers"""
-        # Handle all messages with links or images
+        """Setup message handlers for all chat types"""
+        # Handle messages from all chat types including channels
         self.application.add_handler(
             MessageHandler(
-                filters.TEXT | filters.PHOTO | filters.FORWARDED,
+                filters.TEXT | filters.PHOTO | filters.FORWARDED | filters.ChatType.CHANNEL,
                 self.handle_message
             )
         )
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Main message handler"""
+        """Main message handler for all chat types"""
         try:
-            message = update.message
+            # Handle both regular messages and channel posts
+            message = update.message or update.channel_post
+            
+            if not message:
+                return
+            
+            # Check if bot should respond (for groups/channels)
+            chat_type = message.chat.type
+            
+            # In channels, bot automatically processes all messages
+            # In groups, bot processes messages with links
+            # In private chats, bot processes all messages with links
             
             # Get text from message or caption
             text = self.extract_text(message)
             
             if not text:
                 if message.photo:
-                    await message.reply_text("No title provided")
+                    # Only reply with "No title provided" in private chats
+                    if chat_type == ChatType.PRIVATE:
+                        await message.reply_text("No title provided")
                 return
             
             # Extract and process URLs
@@ -493,14 +699,22 @@ class ReviewCheckkBot:
                 return  # No URLs to process
             
             # Process each URL
+            responses = []
             for url in urls:
                 response = await self.process_url(url, text)
-                if response:
-                    await message.reply_text(response, parse_mode=None)
+                if response and response != "❌ Unable to extract product info":
+                    responses.append(response)
+            
+            # Send consolidated response
+            if responses:
+                final_response = '\n\n'.join(responses)
+                await message.reply_text(final_response, parse_mode=None)
             
         except Exception as e:
             logger.error(f"Error handling message: {e}")
-            await update.message.reply_text("❌ Unable to extract product info")
+            # Don't send error messages in channels
+            if message and message.chat.type == ChatType.PRIVATE:
+                await message.reply_text("❌ Error processing request")
     
     def extract_text(self, message: Message) -> str:
         """Extract text from message or caption"""
@@ -508,8 +722,10 @@ class ReviewCheckkBot:
             return message.text
         elif message.caption:
             return message.caption
-        elif message.forward_from and hasattr(message.forward_from, 'text'):
-            return message.forward_from.text
+        elif hasattr(message, 'forward_from_message_id'):
+            # Handle forwarded messages
+            if message.forward_from:
+                return getattr(message.forward_from, 'text', '')
         return ""
     
     async def process_url(self, url: str, message_text: str) -> Optional[str]:
@@ -521,20 +737,28 @@ class ReviewCheckkBot:
             else:
                 final_url = URLResolver.clean_url(url)
             
-            # First priority: Check if message has forwarded title info
-            forwarded_title = self.extract_forwarded_title(message_text)
+            # Extract title using enhanced multi-strategy approach
+            clean_title = await TitleCleaner.extract_title_with_fallback(final_url, message_text)
             
-            # Extract title with priority: forwarded > scraped > message
-            if forwarded_title:
-                clean_title = TitleCleaner.clean_title(forwarded_title)
-            else:
-                # Try to scrape from URL
-                scraped_title = await TitleCleaner.extract_title_from_url(final_url)
-                if scraped_title:
-                    clean_title = TitleCleaner.clean_title(scraped_title)
+            # Always provide a title, never return "Unable to extract"
+            if not clean_title:
+                # Try one more time with just the URL slug
+                slug_title = TitleCleaner.extract_title_from_url_slug(final_url)
+                if slug_title:
+                    clean_title = TitleCleaner.clean_title(slug_title)
                 else:
-                    # Fallback to message text
-                    clean_title = TitleCleaner.clean_title(message_text)
+                    # Generic fallback based on domain
+                    domain = urlparse(final_url).netloc.lower()
+                    if 'meesho' in domain:
+                        clean_title = "Meesho Product"
+                    elif 'flipkart' in domain or 'fkrt' in domain:
+                        clean_title = "Flipkart Product"
+                    elif 'amazon' in domain or 'amzn' in domain:
+                        clean_title = "Amazon Product"
+                    elif 'myntra' in domain or 'myntr' in domain:
+                        clean_title = "Myntra Fashion"
+                    else:
+                        clean_title = "Product"
             
             # Extract price (prioritize message text)
             price = PriceExtractor.extract_price(message_text)
@@ -548,9 +772,17 @@ class ReviewCheckkBot:
             
             if is_meesho:
                 # Extract size from message
-                size_match = re.search(r'size\s*[-:]?\s*([^\n,]+)', message_text, re.IGNORECASE)
-                if size_match:
-                    size = size_match.group(1).strip()
+                size_patterns = [
+                    r'size\s*[-:]?\s*([^\n,]+)',
+                    r'sizes?\s+available\s*[-:]?\s*([^\n,]+)',
+                    r'\bsize\s+(\w+)\b'
+                ]
+                
+                for pattern in size_patterns:
+                    size_match = re.search(pattern, message_text, re.IGNORECASE)
+                    if size_match:
+                        size = size_match.group(1).strip()
+                        break
                 
                 # Extract PIN
                 pin = PinDetector.extract_pin(message_text)
@@ -562,30 +794,18 @@ class ReviewCheckkBot:
             
         except Exception as e:
             logger.error(f"Error processing URL {url}: {e}")
-            return "❌ Unable to extract product info"
-    
-    def extract_forwarded_title(self, text: str) -> Optional[str]:
-        """Extract title from forwarded message text patterns"""
-        # Look for patterns like "Product Name @price rs"
-        title_price_pattern = r'^([^@]+?)\s*@\d+\s*rs'
-        match = re.search(title_price_pattern, text.strip(), re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-        
-        # Look for title on separate line before URL
-        lines = text.strip().split('\n')
-        for i, line in enumerate(lines):
-            if 'http' in line and i > 0:  # URL found, check previous line
-                potential_title = lines[i-1].strip()
-                if potential_title and not re.search(r'@\d+\s*rs', potential_title):
-                    return potential_title
-        
-        return None
+            # Return a basic response instead of error
+            return f"Product @rs\n{url}"
     
     def run(self):
         """Start the bot"""
-        logger.info("Starting ReviewCheckk Style Bot...")
-        self.application.run_polling()
+        logger.info("Starting Enhanced ReviewCheckk Style Bot...")
+        logger.info("Bot will now respond to:")
+        logger.info("- Direct messages")
+        logger.info("- Group messages with links")
+        logger.info("- Channel posts (when bot is admin)")
+        logger.info("- Forwarded messages")
+        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 def main():
     """Main function"""
